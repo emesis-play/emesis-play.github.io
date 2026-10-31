@@ -6,7 +6,7 @@
   <meta charset="utf-8" />
 
   <title>emesis</title>
-<link rel="icon" type="image/png" href="favicon.png">
+  <link rel="icon" type="image/png" href="https://file.garden/Zfwe_2Ig9weivlFh/emesis%20logo.png">
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <style>
     body { margin:0; overflow:hidden; background:#000; }
@@ -2752,7 +2752,12 @@ function handleConsoleCommand(cmd) {
         socket.emit("enemyState", { revive: targetId });
         return;
     }
-    if (cmd.trim() === "/skipwaves") {
+    if (cmd.trim().toLowerCase() === "/jessmode") {
+    window.lastConsoleCommand = null;
+    if (mpCheatsAllowed()) jessMode();
+    return;
+}
+if (cmd.trim() === "/skipwaves") {
         window.lastConsoleCommand = null;   // so pressing Enter again doesn't re-run it
         if (mpCheatsAllowed()) wavesSkipToBoss();
         return;
@@ -7735,8 +7740,8 @@ for (let i = explosionRings.length - 1; i >= 0; i--) {
 
 // ---- easy-to-edit boss settings ----
 const BOSS_NAME         = "Hideructs";
-const BOSS_MODEL_URL    = "https://file.garden/Zfwe_2Ig9weivlFh/eye.obj";
-const BOSS_TEXTURE_URL  = "https://file.garden/Zfwe_2Ig9weivlFh/eyecolor.png";
+let BOSS_MODEL_URL    = "https://file.garden/Zfwe_2Ig9weivlFh/eye.obj";
+let BOSS_TEXTURE_URL  = "https://file.garden/Zfwe_2Ig9weivlFh/eyecolor.png";
 const BOSS_HURT_TEXTURE_URL = "https://file.garden/Zfwe_2Ig9weivlFh/eyecolor3.png";   // PUT THE LINK TO YOUR DAMAGED-LOOK IMAGE BETWEEN THE QUOTES (same UV layout as eyecolor.png)
 const BOSS_BASE_HP      = 5000;   // pistol hit = 40 dmg. Easy x0.7, Hard x1.4, +60% per extra boss level
 const BOSS_PX           = 380;    // how big the model is on screen (px, biggest dimension)
@@ -10848,6 +10853,8 @@ brodies gay
 } else if (cmd.toLowerCase() === "/cleardata") {
   clearGameData();
   console.log("All saved data cleared and reset to defaults.");
+} else if (cmd.toLowerCase() === "/jessmode") {
+    jessMode();
 } else if (cmd.toLowerCase() === "/skipwaves") {
     if (!wavesMode) {
       console.log("/skipwaves only works in the Waves gamemode.");
@@ -11402,6 +11409,71 @@ setInterval(() => {
   }
 }, 50);
 /* =============== END BOSS MUSIC =============== */
+
+/* =============== JESS MODE =============== */
+function jessMode(){
+  const JESS_MODEL_URL   = "https://file.garden/Zfwe_2Ig9weivlFh/JVM.obj";
+  const JESS_TEXTURE_URL = "https://file.garden/Zfwe_2Ig9weivlFh/jessface.png";
+  const JESS_THEME_URL   = "https://file.garden/Zfwe_2Ig9weivlFh/Annie%20OST(2014)%20-%20It%27s%20A%20Hard-Knock%20Life.mp3";
+
+  if(!wavesMode){ console.log("/jessmode only works in Waves mode."); return; }
+
+  // music
+  const wasPlaying = !bossTheme.paused;
+  bossTheme.src = JESS_THEME_URL;
+  bossTheme.loop = true;
+  if(wasPlaying) bossTheme.play().catch(()=>{});
+
+  // model + texture
+  BOSS_MODEL_URL = JESS_MODEL_URL;
+  BOSS_TEXTURE_URL = JESS_TEXTURE_URL;
+
+  const T = window.THREE;
+  if(!T || !b3d.renderer){
+    // 3D isn't built yet: it will use the new links when it loads
+    b3d.failed = false;
+    bossPreload();
+    console.log("Jess mode on!");
+    return;
+  }
+
+  // 3D already built: swap the model in place
+  if(b3d.pivot) b3d.scene.remove(b3d.pivot);
+  b3d.ready = false;
+
+  const tex = new T.TextureLoader().setCrossOrigin("anonymous").load(JESS_TEXTURE_URL);
+  tex.flipY = true; tex.encoding = T.sRGBEncoding;
+  tex.wrapS = tex.wrapT = T.RepeatWrapping;
+  tex.anisotropy = b3d.renderer.capabilities.getMaxAnisotropy();
+  b3d.tex = tex;
+  b3d.hurtTex = null;
+
+  new T.OBJLoader().load(JESS_MODEL_URL, obj => {
+    const mats = [];
+    obj.traverse(o => {
+      if(o.isMesh){
+        if(!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+        bossEnsureUVs(o.geometry);
+        const m = new T.MeshBasicMaterial({ map: tex });
+        o.material = m; o.frustumCulled = false; mats.push(m);
+      }
+    });
+    const box = new T.Box3().setFromObject(obj);
+    const size = box.getSize(new T.Vector3()), center = box.getCenter(new T.Vector3());
+    obj.position.sub(center);
+    const holder = new T.Group(); holder.add(obj);
+    holder.scale.setScalar(BOSS_PX / Math.max(size.x, size.y, size.z, 0.0001));
+    holder.rotation.set(BOSS_MODEL_ROT.x, BOSS_MODEL_ROT.y, BOSS_MODEL_ROT.z);
+    const pivot = new T.Group(); pivot.add(holder); b3d.scene.add(pivot);
+    b3d.pivot = pivot; b3d.holder = holder; b3d.mats = mats; b3d.ready = true;
+  }, undefined, err => {
+    console.warn("[jess] model failed to load:", err);
+    b3d.failed = true;
+  });
+
+  console.log("Jess mode on!");
+}
+/* =============== END JESS MODE =============== */
 </script>
 
 </body>
