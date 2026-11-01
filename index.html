@@ -4016,11 +4016,17 @@ canvas.addEventListener("mousemove", e => {
   mouse.y = worldPosition.y;
 });
 
-canvas.addEventListener("contextmenu", e => {
+// block the right-click menu everywhere on the page
+document.addEventListener("contextmenu", e => {
+  e.preventDefault();
+});
+
+document.addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
   if (
-    gameState === "playing" &&
-    player &&
-    player.currentGunKey === "hammer"
+    e.key === "F12" ||
+    (e.ctrlKey && k === "u") ||
+    (e.ctrlKey && e.shiftKey && (k === "i" || k === "j" || k === "c"))
   ) {
     e.preventDefault();
   }
