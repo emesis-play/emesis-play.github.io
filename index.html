@@ -91,6 +91,89 @@ const FULLSCREEN_MODE = true;
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 
+// ===== MAC DETECTION =====
+// add ?mac=1 to the end of the page URL to test the Mac mode on any computer
+const IS_MAC = /Mac/i.test(
+  (navigator.userAgentData && navigator.userAgentData.platform) ||
+  navigator.platform ||
+  navigator.userAgent
+) || /[?&]mac=1/.test(location.search);
+
+const glyphCache = new Map();
+const glyphSeen = new Map();
+
+if (IS_MAC) {
+  // 1) load the same symbol / mono fonts for everyone so the odd characters look the same as on Windows
+  const fl = document.createElement("link");
+  fl.rel = "stylesheet";
+  fl.href = "https://fonts.googleapis.com/css2?family=Noto+Sans+Mono&family=Noto+Sans+Symbols+2&family=Noto+Sans+Egyptian+Hieroglyphs&display=swap";
+  fl.onload = () => {
+    ["16px 'Noto Sans Mono'", "16px 'Noto Sans Symbols 2'", "16px 'Noto Sans Egyptian Hieroglyphs'"].forEach(f => {
+      document.fonts.load(f, "𓅓▥⋘ABC").then(() => glyphCache.clear()).catch(() => {});
+    });
+  };
+  document.head.appendChild(fl);
+
+  // 2) keep Arial for normal text (same letter widths as Windows, so menus line up)
+  const MAC_SANS = 'Arial, "Noto Sans Symbols 2", "Noto Sans Egyptian Hieroglyphs", sans-serif';
+  const MAC_MONO = '"Noto Sans Mono", "Courier New", monospace';
+  const fontDesc = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "font");
+  if (fontDesc && fontDesc.set) {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, "font", {
+      configurable: true,
+      get: fontDesc.get,
+      set: function (v) {
+        v = String(v);
+        if (v.indexOf("Noto Sans") === -1) {
+          v = v.replace(/\bsans-serif\b/g, MAC_SANS).replace(/\bmonospace\b/g, MAC_MONO);
+        }
+        fontDesc.set.call(this, v);
+      }
+    });
+  }
+
+  // 3) text cache: each string is drawn once, then copied as a picture (much faster in Safari)
+  const origFillText = CanvasRenderingContext2D.prototype.fillText;
+  const tmpX = document.createElement("canvas").getContext("2d");
+  const SC = 2;
+  CanvasRenderingContext2D.prototype.fillText = function (text, x, y, maxWidth) {
+    const fs = this.fillStyle;
+    if (maxWidth !== undefined || typeof fs !== "string" || this.shadowBlur > 0) return origFillText.apply(this, arguments);
+    text = String(text);
+    if (!text || text.length > 60) return origFillText.apply(this, arguments);
+    const font = this.font, al = this.textAlign, bl = this.textBaseline;
+    const key = font + "|" + al + "|" + bl + "|" + fs + "|" + text;
+    let g = glyphCache.get(key);
+    if (!g) {
+      // only cache text that gets drawn over and over (not numbers that change every frame)
+      const seenN = (glyphSeen.get(key) || 0) + 1;
+      if (seenN < 4) {
+        if (glyphSeen.size > 5000) glyphSeen.clear();
+        glyphSeen.set(key, seenN);
+        return origFillText.apply(this, arguments);
+      }
+      if (glyphCache.size > 800) glyphCache.clear();
+      tmpX.font = font; tmpX.textAlign = al; tmpX.textBaseline = bl;
+      const m = tmpX.measureText(text);
+      const L = Math.ceil(m.actualBoundingBoxLeft || 0) + 3;
+      const R = Math.ceil(Math.max(m.actualBoundingBoxRight || 0, 0)) + 3;
+      const A = Math.ceil(m.actualBoundingBoxAscent || 0) + 3;
+      const D = Math.ceil(m.actualBoundingBoxDescent || 0) + 3;
+      const w = L + R, h = A + D;
+      if (w < 1 || h < 1 || w > 1500 || h > 600) return origFillText.apply(this, arguments);
+      const c = document.createElement("canvas");
+      c.width = w * SC; c.height = h * SC;
+      const cx = c.getContext("2d");
+      cx.scale(SC, SC);
+      cx.font = font; cx.textAlign = al; cx.textBaseline = bl; cx.fillStyle = fs;
+      origFillText.call(cx, text, L, A);
+      g = { c: c, L: L, A: A, w: w, h: h };
+      glyphCache.set(key, g);
+    }
+    this.drawImage(g.c, x - g.L, y - g.A, g.w, g.h);
+  };
+}
+
 // ===== FIT GAME TO WINDOW (keeps the 800x600 shape, no stretching) =====
 function fitGameToWindow(){
   const wrap = document.getElementById("gameWrap");
@@ -2688,7 +2771,7 @@ function playerColorValue(){
 function drawPlayerBody(x, y, color, glow){
   ctx.save();
   if(color) ctx.fillStyle = color;
-  if(glow){
+  if(glow && !IS_MAC){
     ctx.shadowColor = color || (lightMode ? "black" : "white");
     ctx.shadowBlur = 18;
     ctx.fillText("ᗢ", x, y);
@@ -3016,7 +3099,34 @@ const egyptianBirds = ["𓅓","𓅱","𓅭","𓅫","𓅮"];
 // ====== SOUND FUNCTION ======
 let allSounds = [];            // every sound element we have made (so stopAllSounds can silence them)
 const __soundPools = {};       // url -> list of reusable audio elements
+const WA = (IS_MAC && (window.AudioContext || window.webkitAudioContext)) ? new (window.AudioContext || window.webkitAudioContext)() : null;
+const waBuffers = {};
+const waLast = {};
+const waActive = new Set();
 function playSound(url){
+  if(!WA) return playSound_old(url);
+  const b = waBuffers[url];
+  if(b === "failed" || b === "loading") return playSound_old(url);
+  if(!b){
+    waBuffers[url] = "loading";
+    fetch(url).then(r => r.arrayBuffer())
+      .then(d => new Promise((res, rej) => WA.decodeAudioData(d, res, rej)))
+      .then(buf => { waBuffers[url] = buf; })
+      .catch(() => { waBuffers[url] = "failed"; });
+    return playSound_old(url);   // first time only: play the normal way while it loads
+  }
+  if(WA.state === "suspended") WA.resume();
+  const nowS = performance.now();
+  if(waLast[url] && nowS - waLast[url] < 40) return;
+  waLast[url] = nowS;
+  const src = WA.createBufferSource();
+  src.buffer = b;
+  src.connect(WA.destination);
+  waActive.add(src);
+  src.onended = () => waActive.delete(src);
+  src.start(0);
+}
+function playSound_old(url){
     let pool = __soundPools[url];
     if(!pool) pool = __soundPools[url] = [];
     let s = null;
@@ -3037,6 +3147,8 @@ function playSound(url){
     s.play().catch(() => {});
 }
 function stopAllSounds(){
+    waActive.forEach(s => { try{ s.stop(); }catch(e){} });
+    waActive.clear();
     allSounds.forEach(s => { s.pause(); });
     treeBarUpSound.pause();
     bgMusic.pause();
@@ -7610,7 +7722,7 @@ bricks.forEach((b, bi) => {
 
   blood.forEach(b=>{ b.x+=b.dx; b.y+=b.dy; b.life--; });
   blood = blood.filter(b=>b.life>0);
-  if (mpPartyCode && blood.length > (mpLow() ? 150 : 600)) blood.splice(0, blood.length - (mpLow() ? 150 : 600));
+  if ((mpPartyCode || IS_MAC) && blood.length > (mpLow() ? 150 : 600)) blood.splice(0, blood.length - (mpLow() ? 150 : 600));
   updateNewBlood();
 
   dashParticles.forEach(p=>{ p.x+=p.dx; p.y+=p.dy; p.life--; });
@@ -7829,7 +7941,7 @@ function bossBuild3D(){
   const T = window.THREE;
   const el = document.getElementById("bossCanvas");
   const renderer = new T.WebGLRenderer({ canvas: el, alpha: true, antialias: true });
-  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  renderer.setPixelRatio(IS_MAC ? 1 : Math.min(2, window.devicePixelRatio || 1));
   renderer.setSize(800, 600, false);
   renderer.setClearColor(0x000000, 0);
   renderer.outputEncoding = T.sRGBEncoding;
@@ -10369,7 +10481,7 @@ function drawInventory(){
 // (fewer particles / trails, fewer network packets sent). It switches back on its own if things speed up.
 let perfLow = false, perfEma = 16.7, perfLast = 0, perfSince = 0;
 let mpSkipTick = false, mpSkipPos = false;
-function mpLow(){ return perfLow && !!mpPartyCode; }
+function mpLow(){ return IS_MAC || (perfLow && !!mpPartyCode); }
 function perfTick(time){
   if(typeof time !== "number") return;
   if(perfLast){
@@ -10384,7 +10496,8 @@ function perfTick(time){
 // ====== GAME LOOP ======
 const TICK_RATE = 100;       // game speed: updates per second (60 = normal 60Hz speed, higher = faster)
 const STEP_MS = 1000 / TICK_RATE;
-let loopLast = 0, loopAcc = 0;
+let loopLast = 0, loopAcc = 0, lastDrawT = 0;
+let fpsFrames = 0, fpsT = 0, fpsShown = 0;
 function loop(time){
   if(typeof time !== "number") time = performance.now();
   try {
@@ -10404,7 +10517,17 @@ function loop(time){
       steps++;
     }
     if(loopAcc >= STEP_MS) loopAcc = 0;             // way too slow: stop trying to catch up
-    if(steps > 0) draw();
+    if(steps > 0 && (!IS_MAC || time - lastDrawT >= 15)){
+      lastDrawT = time;
+      draw();
+      fpsFrames++;
+      if(time - fpsT > 1000){ fpsShown = fpsFrames; fpsFrames = 0; fpsT = time; }
+      if(/[?&]debug=1/.test(location.search)){
+        ctx.save(); ctx.fillStyle = "lime"; ctx.font = "12px monospace";
+        ctx.fillText("FPS " + fpsShown, 740, 590);
+        ctx.restore();
+      }
+    }
   } catch (err) { console.error("Game loop error:", err); }
   requestAnimationFrame(loop);
 }
@@ -10874,7 +10997,17 @@ brodies gay
 } else if (cmd.startsWith("/runfunction ")) {
     // Ignore — handled by the DevTools console system
 } else {
-    console.log(`Unknown command: ${cmd}`);
+    const fm = cmd.match(/^\/([A-Za-z_$][\w$]*)\s*(?:\((.*)\))?\s*;?$/);
+    if (fm && mpCheatsAllowed()) {
+      try {
+        const result = eval(fm[1] + "(" + (fm[2] || "") + ")");
+        console.log("Ran " + fm[1] + "()", result !== undefined ? result : "");
+      } catch (err) {
+        console.error("Could not run " + fm[1] + ":", err);
+      }
+    } else {
+      console.log(`Unknown command: ${cmd}`);
+    }
 }
 
 
