@@ -1932,6 +1932,8 @@ function mpConnect(){
       if(gameState === "gameover" || gameState === "playing" || gameState === "paused") mpRestartRun();
       return;
     }
+    // host turned on jess mode
+    if(data.jessMode){ jessMode(true); return; }
     // host revived someone
     if(data.revive !== undefined){
       mpDeadPlayers.delete(data.revive);
@@ -7783,6 +7785,7 @@ function wavesReset(){
   wv.n = 0; wv.state = "intermission"; wv.timer = 150; wv.t = 0;
   wv.toSpawn = 0; wv.toSpawnShooters = 0; wv.bannerT = 0;
   boss.active = false; boss.state = "none"; boss.hit = 0; boss.dyingT = 0;
+  if(typeof jessModeOff === "function") jessModeOff();
   if(wavesMode) bossPreload();
 }
 
@@ -11417,7 +11420,7 @@ setInterval(() => {
 /* =============== END BOSS MUSIC =============== */
 
 /* =============== JESS MODE =============== */
-function jessMode(){
+function jessMode_old_unused(){
   const JESS_MODEL_URL   = "https://file.garden/Zfwe_2Ig9weivlFh/JVM.obj";
   const JESS_TEXTURE_URL = "https://file.garden/Zfwe_2Ig9weivlFh/jessface.png";
   const JESS_THEME_URL   = "https://file.garden/Zfwe_2Ig9weivlFh/Annie%20OST(2014)%20-%20It%27s%20A%20Hard-Knock%20Life.mp3";
@@ -11478,6 +11481,94 @@ function jessMode(){
   });
 
   console.log("Jess mode on!");
+}
+let jessActive = false;
+
+const JESS_MODEL_URL   = "https://file.garden/Zfwe_2Ig9weivlFh/JVM.obj";
+const JESS_TEXTURE_URL = "https://file.garden/Zfwe_2Ig9weivlFh/jessface.png";
+const JESS_THEME_URL   = "https://file.garden/Zfwe_2Ig9weivlFh/Annie%20OST(2014)%20-%20It%27s%20A%20Hard-Knock%20Life.mp3";
+
+const NORMAL_BOSS_MODEL_URL   = "https://file.garden/Zfwe_2Ig9weivlFh/eye.obj";
+const NORMAL_BOSS_TEXTURE_URL = "https://file.garden/Zfwe_2Ig9weivlFh/eyecolor.png";
+const NORMAL_BOSS_HURT_URL    = BOSS_HURT_TEXTURE_URL;
+
+// swaps the boss model / texture / hurt texture / music
+function setBossLook(modelUrl, textureUrl, hurtUrl, themeUrl){
+  const wasPlaying = !bossTheme.paused;
+  bossTheme.src = themeUrl;
+  bossTheme.loop = true;
+  if(wasPlaying) bossTheme.play().catch(()=>{});
+
+  BOSS_MODEL_URL = modelUrl;
+  BOSS_TEXTURE_URL = textureUrl;
+
+  const T = window.THREE;
+  if(!T || !b3d.renderer){
+    // 3D isn't built yet: it will use the new links when it loads
+    b3d.failed = false;
+    bossPreload();
+    return;
+  }
+
+  // 3D already built: swap the model in place
+  if(b3d.pivot) b3d.scene.remove(b3d.pivot);
+  b3d.ready = false;
+  b3d.loading = true;
+
+  const tex = new T.TextureLoader().setCrossOrigin("anonymous").load(textureUrl);
+  tex.flipY = true; tex.encoding = T.sRGBEncoding;
+  tex.wrapS = tex.wrapT = T.RepeatWrapping;
+  tex.anisotropy = b3d.renderer.capabilities.getMaxAnisotropy();
+  b3d.tex = tex;
+
+  b3d.hurtTex = null;
+  if(hurtUrl){
+    const ht = new T.TextureLoader().setCrossOrigin("anonymous").load(hurtUrl);
+    ht.flipY = true; ht.encoding = T.sRGBEncoding;
+    ht.wrapS = ht.wrapT = T.RepeatWrapping;
+    b3d.hurtTex = ht;
+  }
+
+  new T.OBJLoader().load(modelUrl, obj => {
+    const mats = [];
+    obj.traverse(o => {
+      if(o.isMesh){
+        if(!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+        bossEnsureUVs(o.geometry);
+        const m = new T.MeshBasicMaterial({ map: tex });
+        o.material = m; o.frustumCulled = false; mats.push(m);
+      }
+    });
+    const box = new T.Box3().setFromObject(obj);
+    const size = box.getSize(new T.Vector3()), center = box.getCenter(new T.Vector3());
+    obj.position.sub(center);
+    const holder = new T.Group(); holder.add(obj);
+    holder.scale.setScalar(BOSS_PX / Math.max(size.x, size.y, size.z, 0.0001));
+    holder.rotation.set(BOSS_MODEL_ROT.x, BOSS_MODEL_ROT.y, BOSS_MODEL_ROT.z);
+    const pivot = new T.Group(); pivot.add(holder); b3d.scene.add(pivot);
+    b3d.pivot = pivot; b3d.holder = holder; b3d.mats = mats; b3d.ready = true; b3d.loading = false;
+  }, undefined, err => {
+    console.warn("[boss] model failed to load:", err);
+    b3d.failed = true; b3d.loading = false;
+  });
+}
+
+function jessMode(fromNetwork){
+  if(!wavesMode){ console.log("/jessmode only works in Waves mode."); return; }
+  jessActive = true;
+  // host tells everyone else in the party
+  if(!fromNetwork && socket && mpPartyCode && mpIsHost){
+    socket.emit("enemyState", { jessMode: 1 });
+  }
+  setBossLook(JESS_MODEL_URL, JESS_TEXTURE_URL, null, JESS_THEME_URL);
+  console.log("Jess mode on!");
+}
+
+// puts the normal boss back (called automatically when a new game starts)
+function jessModeOff(){
+  if(!jessActive) return;
+  jessActive = false;
+  setBossLook(NORMAL_BOSS_MODEL_URL, NORMAL_BOSS_TEXTURE_URL, NORMAL_BOSS_HURT_URL, BOSS_THEME_URL);
 }
 /* =============== END JESS MODE =============== */
 </script>
