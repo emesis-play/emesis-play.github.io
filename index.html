@@ -2367,7 +2367,7 @@ function mpConnect(){
       walls.push({
         id: nextItemId++, cid: data.cid,
         x: wx, y: wy,
-        w: Math.min(ww, HAMMER_WALL_HEIGHT), h: Math.min(wh, HAMMER_WALL_HEIGHT),
+        w: Math.min(ww, 120), h: Math.min(wh, 120),
         health: 3, life: 90000, shake: 0
       });
       for (let i = 0; i < 8; i++) {
@@ -2818,6 +2818,36 @@ let playerHue = -1;       // -1 = default color, otherwise 0-359 (hue only)
 function playerColorValue(){
   return playerHue === -1 ? null : "hsl(" + playerHue + ",100%,50%)";
 }
+// the player's glyph is drawn from the text baseline, so what you see is a bit ABOVE player.y.
+// this gives the y of the visible middle of the player (used for hit checks).
+// make 0.33 bigger to move the hitbox higher, smaller to move it lower
+// the player's glyph is drawn left-aligned from the text baseline, so what you SEE is up and to the right of player.x / player.y.
+// this measures where the visible middle really is and caches it per text size
+let __phCache = { size: 0, ox: 0, oy: 0 };
+function playerVisOffset(){
+  if(__phCache.size !== textSize){
+    ctx.save();
+    ctx.font = textSize + "px sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    const m = ctx.measureText("ᗢ");
+    ctx.restore();
+    let ox = m.width / 2, oy = -textSize * 0.33;
+    if(m.actualBoundingBoxAscent !== undefined){
+      ox = (m.actualBoundingBoxRight - m.actualBoundingBoxLeft) / 2;
+      oy = (m.actualBoundingBoxDescent - m.actualBoundingBoxAscent) / 2;
+    }
+    let hw = 6, hh = 5;   // half the width / height of the visible player
+    if(m.actualBoundingBoxAscent !== undefined){
+      hw = (m.actualBoundingBoxRight + m.actualBoundingBoxLeft) / 2;
+      hh = (m.actualBoundingBoxAscent + m.actualBoundingBoxDescent) / 2;
+    }
+    __phCache = { size: textSize, ox: ox, oy: oy, hw: hw, hh: hh };
+  }
+  return __phCache;
+}
+function playerHitX(){ return player.x + playerVisOffset().ox; }
+function playerHitY(){ return player.y + playerVisOffset().oy; }
 function drawPlayerBody(x, y, color, glow){
   ctx.save();
   if(color) ctx.fillStyle = color;
@@ -4969,8 +4999,32 @@ if(flashOnShoot){
 // Single source of truth for where a hammer wall will go — used by both
 // the preview outline and the actual placement, so they can never disagree.
 const HAMMER_WALL_DISTANCE = 40;
+const WALL_HITBOX_SHRINK = 2;   // how many pixels smaller the hitbox is than the drawn wall, on EACH side (0 = same size as the wall)
 const HAMMER_WALL_WIDTH = 11;
 const HAMMER_WALL_HEIGHT = 56;
+
+// measures the real size of the wall text, so the hitbox / outline / drawing are all the same box.
+// len = length of the wall, thick = thickness, tx/ty = where to draw the text so it is centred on the box
+let __wallInk = null;
+function wallInkBox(){
+  if(!__wallInk){
+    ctx.save();
+    ctx.font = "14px monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    const m = ctx.measureText("▥▥▥▥");
+    ctx.restore();
+    const L = m.actualBoundingBoxLeft, R = m.actualBoundingBoxRight;
+    const A = m.actualBoundingBoxAscent, D = m.actualBoundingBoxDescent;
+    if(m.actualBoundingBoxAscent !== undefined && (L + R) > 0 && (A + D) > 0){
+      const len = L + R, thick = A + D;
+      __wallInk = { len: len, thick: thick, tx: -len / 2 + L, ty: -thick / 2 + A };
+    } else {
+      __wallInk = { len: HAMMER_WALL_HEIGHT, thick: HAMMER_WALL_WIDTH, tx: -23, ty: -3.2 };
+    }
+  }
+  return __wallInk;
+}
 
 function getHammerWallPlacement(){
   const rawAngle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
@@ -4985,8 +5039,10 @@ function getHammerWallPlacement(){
   // pointing left/right (east/west) -> wall should be narrow & tall
   const pointingVertical = Math.abs(Math.sin(roundedAngle)) > 0.5;
 
-  const w = pointingVertical ? HAMMER_WALL_HEIGHT : HAMMER_WALL_WIDTH;
-  const h = pointingVertical ? HAMMER_WALL_WIDTH : HAMMER_WALL_HEIGHT;
+  const ink = wallInkBox();
+  const shrink = WALL_HITBOX_SHRINK * 2;   // both sides
+  const w = Math.max(2, (pointingVertical ? ink.len : ink.thick) - shrink);
+  const h = Math.max(2, (pointingVertical ? ink.thick : ink.len) - shrink);
 
   return { x, y, w, h, angle: roundedAngle };
 }
@@ -5053,7 +5109,10 @@ function fireHammer(now) {
     return;
   }
 
-  const placement = getHammerWallPlacement();
+  // use exactly what the outline was showing; only recalculate if there was no outline yet
+  const placement = previewWall
+    ? { x: previewWall.x, y: previewWall.y, w: previewWall.w, h: previewWall.h }
+    : getHammerWallPlacement();
   const wallX = placement.x;
   const wallY = placement.y;
 
@@ -5830,6 +5889,28 @@ function updateGravityGun(){
     if(e.y <= b.t){ e.y = b.t; e.gvy = Math.abs(e.gvy); hit = true; }
     else if(e.y >= b.b){ e.y = b.b; e.gvy = -Math.abs(e.gvy); hit = true; }
     if(hit) gravityWallHit(e, g);
+
+    // ---- hitting another enemy kills it ----
+    // (the launched enemy may have just died from the wall hit)
+    if(enemies.indexOf(e) === -1 && bossEnemies.indexOf(e) === -1) return;
+    const victims = [];
+    all.forEach(o => {
+      if(o === e || o.gravity) return;   // skip itself and anything held / flying
+      if(Math.hypot(o.x - e.x, o.y - e.y) > 22) return;
+      victims.push(o);
+    });
+    victims.forEach(o => {
+      if(enemies.indexOf(o) === -1 && bossEnemies.indexOf(o) === -1) return;   // already dead
+      const tough = (bossEnemies.indexOf(o) !== -1) || !instakillEnabled;
+      if(tough){
+        if(o.maxHealth === undefined){ o.maxHealth = ENEMY_MAX_HEALTH; o.health = ENEMY_MAX_HEALTH; }
+        o.health -= g.wallDamage;
+        if(o.health <= 0){ o.gOwner = e.gOwner; gravityKill(o); }
+      } else {
+        o.gOwner = e.gOwner;   // so the kill counts for whoever launched it
+        gravityKill(o);
+      }
+    });
   });
 }
 
@@ -6962,19 +7043,18 @@ if (!player.dashing && player.alive) {
   if (keys["a"]) dx -= player.speed;
   if (keys["d"]) dx += player.speed;
 
+  const pv = playerVisOffset();
+  // does the player's visible body (a small box) overlap this wall's box at this spot?
+  const bodyHitsWall = (w, px, py) =>
+    Math.abs(px + pv.ox - w.x) < w.w / 2 + pv.hw &&
+    Math.abs(py + pv.oy - w.y) < w.h / 2 + pv.hh;
+
   // Move horizontally first
   let newX = player.x + dx;
   let blockedX = false;
   for (let w of walls) {
-    if (
-      newX >= w.x - w.w / 2 &&
-      newX <= w.x + w.w / 2 &&
-      player.y >= w.y - w.h / 2 &&
-      player.y <= w.y + w.h / 2
-    ) {
-      blockedX = true;
-      break;
-    }
+    if (bodyHitsWall(w, player.x, player.y)) continue;   // already touching it (e.g. just placed) -> allow walking out
+    if (bodyHitsWall(w, newX, player.y)) { blockedX = true; break; }
   }
   if (!blockedX) {
     player.x = newX;
@@ -6984,15 +7064,8 @@ if (!player.dashing && player.alive) {
   let newY = player.y + dy;
   let blockedY = false;
   for (let w of walls) {
-    if (
-      player.x >= w.x - w.w / 2 &&
-      player.x <= w.x + w.w / 2 &&
-      newY >= w.y - w.h / 2 &&
-      newY <= w.y + w.h / 2
-    ) {
-      blockedY = true;
-      break;
-    }
+    if (bodyHitsWall(w, player.x, player.y)) continue;   // already touching it -> allow walking out
+    if (bodyHitsWall(w, player.x, newY)) { blockedY = true; break; }
   }
   if (!blockedY) {
     player.y = newY;
@@ -7412,10 +7485,11 @@ if (Math.abs(diff) < 0.1 && t.cooldown <= 0) {
         const hy = (b.dy / sp) * (BOSS_BULLET_LEN / 2);
         const x1 = b.x - hx, y1 = b.y - hy, x2 = b.x + hx, y2 = b.y + hy;
         const cx = x2 - x1, cy = y2 - y1;
-        const tt = Math.max(0, Math.min(1, ((player.x - x1) * cx + (player.y - y1) * cy) / (cx * cx + cy * cy || 1)));
-        hit = Math.hypot(player.x - (x1 + cx * tt), player.y - (y1 + cy * tt)) < BOSS_BULLET_R + BOSS_PLAYER_R;
+        const phx = playerHitX(), phy = playerHitY();
+        const tt = Math.max(0, Math.min(1, ((phx - x1) * cx + (phy - y1) * cy) / (cx * cx + cy * cy || 1)));
+        hit = Math.hypot(phx - (x1 + cx * tt), phy - (y1 + cy * tt)) < BOSS_BULLET_R + BOSS_PLAYER_R;
       } else {
-        hit = Math.hypot(b.x - player.x, b.y - player.y) < 14;   // other enemy bullets unchanged
+        hit = Math.hypot(b.x - playerHitX(), b.y - playerHitY()) < 11;
       }
       if (hit) {
         if(b.nid !== undefined) mpEnemyBulletsHit.add(b.nid);
@@ -9020,7 +9094,7 @@ function bossRocketsUpdate(){
     const b = bossBlasts[i];
     b.radius += b.speed;
     b.life--;
-    if(!b.hit && player.alive && Math.hypot(player.x - b.x, player.y - b.y) < b.radius){
+    if(!b.hit && player.alive && Math.hypot(playerHitX() - b.x, playerHitY() - b.y) < b.radius){
       b.hit = true;
       damagePlayer(BOSS_ROCKET_DMG);
     }
@@ -10395,10 +10469,14 @@ walls.forEach(w => {
 
   ctx.font = "14px monospace";
   ctx.fillStyle = "white";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
 
   if (w.h > w.w) ctx.rotate(Math.PI / 2);
 
-  ctx.fillText("▥▥▥▥", -23, -3.2);
+  // normal size text, centred on the wall's box (the box is measured from this same text)
+  const wink = wallInkBox();
+  ctx.fillText("▥▥▥▥", wink.tx, wink.ty);
   ctx.restore();
 });
 if (previewWall) {
@@ -10581,7 +10659,10 @@ if (inCar) {
 
 else {
     // normal player drawing
+    ctx.save();
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";   // fixed so the hitbox math always matches
     drawPlayerBody(player.x, player.y, playerColorValue(), playerGlow);
+    ctx.restore();
     let angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
     ctx.save();
     ctx.translate(player.x, player.y);
@@ -12589,6 +12670,10 @@ const EYES_IMAGE_CELL = { c: 2, r: 8 };              // picture sits in the midd
 
 const eyesImg = new Image();
 eyesImg.src = EYES_IMG_URL;
+// if the picture ever fails to load, try again so it is still there next time
+eyesImg.onerror = function(){
+  setTimeout(function(){ eyesImg.src = EYES_IMG_URL + "?r=" + Date.now(); }, 500);
+};
 
 function eyesFresh(){
   return { active: false, phase: 0, x1: 0, x2: 0, holeY: 0, walls: [], ghosts: [],
@@ -12604,6 +12689,20 @@ function eyesStart(){
   if(eyes.active) return;
   eyes = eyesFresh();
   eyes.active = true;
+  // make sure the end picture is really loaded for this run
+  if(eyesImg.complete && eyesImg.naturalWidth === 0){
+    eyesImg.src = EYES_IMG_URL + "?r=" + Date.now();
+  }
+  if(eyesFinalImg.complete && eyesFinalImg.naturalWidth === 0){
+    eyesFinalImg.src = EYES_FINAL_IMG_URL + "?r=" + Date.now();
+  }
+  // make sure the end picture is really loaded for this run
+  if(eyesImg.complete && eyesImg.naturalWidth === 0){
+    eyesImg.src = EYES_IMG_URL + "?r=" + Date.now();
+  }
+  if(eyesFinalImg.complete && eyesFinalImg.naturalWidth === 0){
+    eyesFinalImg.src = EYES_FINAL_IMG_URL + "?r=" + Date.now();
+  }
   eyes.x1 = Math.round(player.x + EYES_WALL_DISTANCE);
   eyes.walls.push([eyes.x1, -100000, eyes.x1, 100000]);   // the first wall (a long white line)
   eyes.prevX = player.x;
@@ -12718,13 +12817,15 @@ function eyesPushOut(px, py){
 function eyesCollide(){
   let px = eyes.prevX, py = eyes.prevY;
   const tx = player.x, ty = player.y;
+  const vo = playerVisOffset();
+  const ox = vo.ox, oy = vo.oy;   // where the visible player is compared to player.x / player.y
   const dist = Math.hypot(tx - px, ty - py);
   const steps = Math.max(1, Math.min(200, Math.ceil(dist / 3)));
   const sx = (tx - px) / steps, sy = (ty - py) / steps;
   for(let i = 0; i < steps; i++){
     px += sx; py += sy;
-    const r = eyesPushOut(px, py);
-    px = r[0]; py = r[1];
+    const r = eyesPushOut(px + ox, py + oy);
+    px = r[0] - ox; py = r[1] - oy;
   }
   player.x = px;
   player.y = py;
@@ -12762,7 +12863,7 @@ function eyesUpdate(){
   // 0 -> 1: the first wall comes on screen
   if(eyes.phase === 0 && player.x + halfW >= eyes.x1){ eyes.phase = 1; eyesBeginFade(); eyesSpawnHallway(); }
   // 1 -> 2: the player hits the first wall
-  if(eyes.phase === 1 && player.x >= eyes.x1 - EYES_R - 3) eyes.phase = 2;
+  if(eyes.phase === 1 && playerHitX() >= eyes.x1 - EYES_R - 3) eyes.phase = 2;
   // 2 -> 3: the player starts going left, the second wall + hallway appear just out of sight
   if(eyes.phase === 2 && player.x < eyes.x1 - 60){ eyes.phase = 3; }
 
@@ -12775,7 +12876,7 @@ function eyesUpdate(){
       }
     }
     // near the picture: cut to black
-    if(Math.hypot(player.x - eyes.imgX, player.y - eyes.imgY) < 36){
+    if(Math.hypot(playerHitX() - eyes.imgX, playerHitY() - eyes.imgY) < 36){
       eyes.phase = 4;
       eyes.endAt = now;
       keys = {};
@@ -12829,7 +12930,7 @@ function eyesDrawWorld(){
   }
 
   // the picture in the middle of the last room
-  if(eyes.phase >= 3 && eyes.imgX && eyesImg.complete && eyesImg.naturalWidth > 0){
+  if(eyes.phase >= 1 && eyes.imgX && eyesImg.complete && eyesImg.naturalWidth > 0){
     const w = EYES_IMG_SIZE, h = w * eyesImg.naturalHeight / eyesImg.naturalWidth;
     ctx.drawImage(eyesImg, eyes.imgX - w / 2, eyes.imgY - h / 2, w, h);
   }
