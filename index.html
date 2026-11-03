@@ -1145,28 +1145,40 @@ function drawMpPublic_old(){
 function drawMpLobbySettings(){
   const cheatLabel = { everyone: "Everyone", host: "Host only", off: "Off" }[mpCheatsMode] || "Host only";
   const rows = [
-    "Cheats: " + cheatLabel,
     "Game Mode: " + mpGameMode,
+    "Difficulty: " + (mpIsHost ? difficulty : mpDifficultyShown),
     "Instakill: " + (instakillEnabled ? "ON" : "OFF"),
     "Inf Ammo: " + (infAmmoEnabled ? "ON" : "OFF"),
-    "Difficulty: " + (mpIsHost ? difficulty : mpDifficultyShown),
     "Revive Mode: " + (mpReviveMode ? "ON" : "OFF"),
+    "Cheats: " + cheatLabel,
     "Public Party: " + (mpPublic ? "ON" : "OFF")
   ];
   if(mpIsHost) rows.push("Start Game");
   ctx.save();
   ctx.font = "14px sans-serif";
-  const baseY = canvas.height - 310;
+  const baseY = canvas.height - 335;
+  // settings first, then a gap, then Public Party + Start Game together at the bottom
+  const rowY = i => baseY + 18 + i * 24 + (i >= 6 ? 30 : 0);
+  ctx.fillStyle = "white";
+  ctx.globalAlpha = 0.5;
+  ctx.font = "12px sans-serif";
+  ctx.fillText("GAME SETTINGS", canvas.width/2-100, baseY);
+  ctx.fillText("PARTY", canvas.width/2-100, rowY(6) - 20);
+  ctx.globalAlpha = 1;
+  ctx.font = "14px sans-serif";
   rows.forEach((label, i) => {
     const selected = mpIsHost && i === mpLobbySel;
+    const isStart = (label === "Start Game");
+    ctx.font = isStart ? "18px sans-serif" : "14px sans-serif";
     ctx.fillStyle = selected ? "yellow" : "white";
-    ctx.fillText((selected ? "◄ " : "    ") + label + (selected ? " ►" : ""), canvas.width/2-100, baseY + i * 24);
+    ctx.fillText((selected ? "◄ " : "    ") + (isStart ? "START GAME" : label) + (selected ? " ►" : ""), canvas.width/2-100, rowY(i) + (isStart ? 2 : 0));
   });
+  ctx.font = "14px sans-serif";
   if(mpIsHost){
     ctx.fillStyle = "white";
     ctx.font = "12px sans-serif";
     ctx.fillText(mpEditingName ? "Type a name, Enter to confirm, Esc to cancel"
-                               : "↑ ↓ pick (go up from the top to rename your party), ← → or Enter to change", canvas.width/2-100, baseY + rows.length * 24 + 4);
+                               : " ", canvas.width/2-100, rowY(rows.length - 1) + 30);
   }
   ctx.restore();
 }
@@ -1181,20 +1193,20 @@ function mpApplyGameMode(mode){
 
 function mpChangeLobbySetting(step){
   if(mpLobbySel === 0){
-    const order = ["everyone","host","off"];
-    mpCheatsMode = order[(order.indexOf(mpCheatsMode) + step + order.length) % order.length];
-  } else if(mpLobbySel === 1){
     const i = mpGameModeOptions.indexOf(mpGameMode);
     mpApplyGameMode(mpGameModeOptions[(i + step + mpGameModeOptions.length) % mpGameModeOptions.length]);
+  } else if(mpLobbySel === 1){
+    const dOrder = ["Easy","Normal","Hard"];
+    difficulty = dOrder[(dOrder.indexOf(difficulty) + step + dOrder.length) % dOrder.length];
   } else if(mpLobbySel === 2){
     instakillEnabled = !instakillEnabled;
   } else if(mpLobbySel === 3){
     infAmmoEnabled = !infAmmoEnabled;
   } else if(mpLobbySel === 4){
-    const dOrder = ["Easy","Normal","Hard"];
-    difficulty = dOrder[(dOrder.indexOf(difficulty) + step + dOrder.length) % dOrder.length];
-  } else if(mpLobbySel === 5){
     mpReviveMode = !mpReviveMode;
+  } else if(mpLobbySel === 5){
+    const order = ["everyone","host","off"];
+    mpCheatsMode = order[(order.indexOf(mpCheatsMode) + step + order.length) % order.length];
   }
 }
 
@@ -1897,6 +1909,7 @@ function mpSampleSnaps(o, renderT, kx, ky){
 }
 let mpPendingClientWalls = []; // walls this client placed that the host hasn't confirmed yet
 let mpPendingClientDrops = []; // ammo drops this client made that the host hasn't confirmed yet
+let mpMyDropCids = new Set();  // ids of ammo drops I made, so I never replay their glide
 
 // Keeps each item's last few host positions so clients can glide between snapshots
 function mpTweenItems(incoming, prevArr, now){
@@ -2186,7 +2199,17 @@ function mpConnect(){
     // forget my local ammo drops once the glide finished and the host has confirmed them (or after 3s)
     mpPendingClientDrops = mpPendingClientDrops.filter(d => nowTween - d.t < 3000 && !(!d.pickup.tw && inP.some(x => x.cid === d.cid)));
     const mpPendCids = new Set(mpPendingClientDrops.map(d => d.cid));
+    const mpOldPickById = {};
+    pickups.forEach(o => { if(o.id !== undefined) mpOldPickById[o.id] = o; });
     pickups = mpTweenItems(inP.filter(p => !pendingLocalRemovals.pickups.has(p.id) && !(p.cid && mpPendCids.has(p.cid))), pickups, nowTween);
+    pickups.forEach(p => {
+      const old = mpOldPickById[p.id];
+      if(old && old.tw && typeof old.tw === "object"){ p.tw = old.tw; }
+      else if(!old && p.dg && !(p.cid && mpMyDropCids.has(p.cid))){
+        p.x = p.dg.sx; p.y = p.dg.sy;
+        p.tw = { sx: p.dg.sx, sy: p.dg.sy, tx: p.snaps[p.snaps.length - 1].x, ty: p.snaps[p.snaps.length - 1].y, start: performance.now() - Math.max(0, Math.min(399, p.dg.el)), dur: 400 };
+      } else { p.tw = null; }
+    });
     mpPendingClientDrops.forEach(d => pickups.push(d.pickup));
     pendingLocalRemovals.pickups.forEach(id => { if(!inP.some(p=>p.id===id)) pendingLocalRemovals.pickups.delete(id); });
 
@@ -2577,7 +2600,7 @@ function mpBuildSlow(){
     instakill: instakillEnabled ? 1 : 0,
     infammo: infAmmoEnabled ? 1 : 0,
     reviveMode: mpReviveMode ? 1 : 0,
-    pickups: pickups.map(p=>({id:p.id,x:p.x,y:p.y,tw:p.tw?1:0,cid:p.cid})),
+    pickups: pickups.map(p=>({id:p.id,x:mpR(p.tw?p.tw.tx:p.x),y:mpR(p.tw?p.tw.ty:p.y),cid:p.cid,dg:p.tw?{sx:mpR(p.tw.sx),sy:mpR(p.tw.sy),el:Math.round(performance.now()-p.tw.start)}:undefined})),
     gunPickups: gunPickups.map(g=>({id:g.id,x:g.x,y:g.y,gunKey:g.gunKey,glyph:g.glyph,bob:g.bob,rotation:g.rotation})),
     healthKits: healthKits.map(h=>({id:h.id,x:h.x,y:h.y})),
     magnetPickups: Magnetpickup.map(m=>({id:m.id,x:m.x,y:m.y})),
@@ -2991,6 +3014,11 @@ function handleConsoleCommand(cmd) {
         socket.emit("enemyState", { revive: targetId });
         return;
     }
+    if (cmd.trim().toLowerCase() === "/eyeswide") {
+        window.lastConsoleCommand = null;
+        if (mpCheatsAllowed()) eyesStart();
+        return;
+    }
     if (cmd.trim().toLowerCase() === "/jessmode") {
     window.lastConsoleCommand = null;
     if (mpCheatsAllowed()) jessMode();
@@ -3106,6 +3134,7 @@ document.addEventListener("keydown", (e) => {
   } else if (socket) {
     // show the ammo right away on this screen, the host's copy replaces it once it arrives
     const dcid = (socket.id || "c") + "_d" + (++mpWallCounter);
+    mpMyDropCids.add(dcid);
     const localDrop = { x: player.x, y: player.y, local: true, cid: dcid, tw: { sx: player.x, sy: player.y, tx: dropX, ty: dropY, start: performance.now(), dur: 400 } };
     mpPendingClientDrops.push({ cid: dcid, t: performance.now(), pickup: localDrop });
     pickups.push(localDrop);
@@ -6794,7 +6823,7 @@ function update(time){
      bossEnemies.forEach(e => mpSampleSnaps(e, interpT, "x", "y"));
      // items (the magnet pull) glide between host snapshots instead of jumping
      [pickups, gunPickups, healthKits, Magnetpickup, bricks].forEach(arr => {
-       arr.forEach(o => mpSampleSnaps(o, interpT, "x", "y"));
+       arr.forEach(o => { if(o.tw && typeof o.tw === "object") return; mpSampleSnaps(o, interpT, "x", "y"); });
      });
      walls.forEach(w=>{ if(w.shake > 0) w.shake *= 0.95; });
      if(wavesMode && boss.active){
@@ -8472,7 +8501,19 @@ bricks.forEach((b, bi) => {
 
   gunPickups.forEach(g=>{ g.bob += 0.1; });
   gunPickups.forEach((g, gi)=>{
-    if(Math.hypot(player.x-g.x,player.y-g.y)<20){
+    // hitbox = the real shape of the gun's glyph (rotated with it), not a circle
+    ctx.save();
+    ctx.font = textSize + "px sans-serif";
+    const gunW = ctx.measureText(g.glyph || "").width;
+    ctx.restore();
+    const gunHalfW = Math.max(10, gunW / 2) + 8;
+    const gunHalfH = Math.max(10, textSize * 0.5) + 8;
+    const gunRot = g.rotation || 0;
+    const gdx = player.x - g.x;
+    const gdy = player.y - (g.y + Math.sin(g.bob) * 3);
+    const gLocalX = gdx * Math.cos(gunRot) + gdy * Math.sin(gunRot);
+    const gLocalY = -gdx * Math.sin(gunRot) + gdy * Math.cos(gunRot);
+    if(Math.abs(gLocalX) < gunHalfW && Math.abs(gLocalY) < gunHalfH){
       if (g.gunKey === "nuke") {
         ensureInInventory("nuke");
         player.nukes = (player.nukes || 0) + 1;
@@ -10289,6 +10330,7 @@ ctx.save();
 applyCameraTransform();
 drawGameBorder();
 drawOpenWorldGrid();
+eyesDrawWorld();
 
 
 
@@ -11803,6 +11845,8 @@ brodies gay
 } else if (cmd.toLowerCase() === "/cleardata") {
   clearGameData();
   console.log("All saved data cleared and reset to defaults.");
+} else if (cmd.toLowerCase() === "/eyeswide") {
+    eyesStart();
 } else if (cmd.toLowerCase() === "/jessmode") {
     jessMode();
 } else if (cmd.toLowerCase() === "/skipwaves") {
@@ -12522,6 +12566,342 @@ function jessModeOff(){
   setBossLook(NORMAL_BOSS_MODEL_URL, NORMAL_BOSS_TEXTURE_URL, NORMAL_BOSS_HURT_URL, BOSS_THEME_URL);
 }
 /* =============== END JESS MODE =============== */
+
+/* =============== /eyeswide EVENT (single player, Openworld) =============== */
+const EYES_IMG_URL = "https://file.garden/Zfwe_2Ig9weivlFh/eyeswide.png";
+const EYES_WALL_DISTANCE = 2000;  // how far right of you the first wall is when you type /eyeswide
+const EYES_CELL = 30;             // hallway width (a bit wider than the player)
+const EYES_R = 7;                 // how close the player's centre can get to a wall line
+const EYES_FADE_MS = 1800;        // how long enemies + pickups take to fade away
+const EYES_END_BLACK_MS = 10000;  // how long the screen stays black before the title screen
+const EYES_FINAL_IMG_URL = "https://file.garden/Zfwe_2Ig9weivlFh/eyeswider.png";   // picture that fades in on the black screen
+const EYES_FINAL_FADE_MS = 7000;  // how long the fade-in takes
+const EYES_FINAL_STEPS = 14;      // number of choppy steps in the fade (lower = choppier)
+const eyesFinalImg = new Image();
+eyesFinalImg.src = EYES_FINAL_IMG_URL;
+const EYES_IMG_SIZE = 26;         // picture width in pixels (the player is about 14)
+const EYES_GRID_W = 30, EYES_GRID_H = 16;
+const EYES_ENTRANCE = { c: 29, r: 7 };   // the hole in the second wall leads into this cell
+// the hallway (always the same): each point is a turn, as [column, row]
+const EYES_PATH = [[29,7],[27,7],[27,9],[24,9],[24,12],[20,12],[20,5],[16,5],[16,13],[12,13],[12,8],[5,8]];
+const EYES_ROOM = { c0: 0, c1: 4, r0: 5, r1: 11 };   // the room at the end
+const EYES_IMAGE_CELL = { c: 2, r: 8 };              // picture sits in the middle of that room
+
+const eyesImg = new Image();
+eyesImg.src = EYES_IMG_URL;
+
+function eyesFresh(){
+  return { active: false, phase: 0, x1: 0, x2: 0, holeY: 0, walls: [], ghosts: [],
+           fadeStart: 0, spawnBlock: false, musicOff: false, endAt: 0,
+           imgX: 0, imgY: 0, prevX: 0, prevY: 0 };
+}
+let eyes = eyesFresh();
+
+function eyesStart(){
+  if(gameState !== "playing" || !player || !openWorldMode || mpPartyCode || tutorialActive){
+    return;
+  }
+  if(eyes.active) return;
+  eyes = eyesFresh();
+  eyes.active = true;
+  eyes.x1 = Math.round(player.x + EYES_WALL_DISTANCE);
+  eyes.walls.push([eyes.x1, -100000, eyes.x1, 100000]);   // the first wall (a long white line)
+  eyes.prevX = player.x;
+  eyes.prevY = player.y;
+}
+
+// removes everything that could be alive in the world (arrays are emptied, not replaced)
+function eyesClearWorld(){
+  enemies.length = 0;
+  bossEnemies.length = 0;
+  pickups.length = 0;
+  healthKits.length = 0;
+  Magnetpickup.length = 0;
+  gunPickups.length = 0;
+  bricks.length = 0;
+  cars.length = 0;
+  worms.length = 0;
+  if(bullets.some(b => b.enemyBullet)) bullets = bullets.filter(b => !b.enemyBullet);
+  if(tree){ tree = null; }
+  treeExists = true;               // stops new trees + their warnings
+  window.lastWormWarning = null;
+}
+
+// the player has seen the first wall: everything fades, nothing new spawns
+function eyesBeginFade(){
+  const g = [];
+  enemies.forEach(e => {
+    if(e.aliveSound){ try{ e.aliveSound.pause(); }catch(_){} }
+    g.push({ t: e.bird, x: e.x, y: e.y });
+  });
+  bossEnemies.forEach(e => g.push({ t: e.gug ? "𓅃" : "♀", x: e.x, y: e.y }));
+  pickups.forEach(p => g.push({ t: "¤", x: p.x, y: p.y }));
+  healthKits.forEach(h => g.push({ t: "+", x: h.x, y: h.y }));
+  Magnetpickup.forEach(m => g.push({ t: "ᘰ", x: m.x, y: m.y }));
+  bricks.forEach(b => g.push({ t: "⊠", x: b.x, y: b.y }));
+  cars.forEach(c => g.push({ t: c.glyph, x: c.x, y: c.y }));
+  gunPickups.forEach(gp => g.push({ t: gp.glyph, x: gp.x, y: gp.y + Math.sin(gp.bob || 0) * 3, rot: gp.rotation || 0 }));
+  eyes.ghosts = g;
+  eyes.fadeStart = performance.now();
+  eyes.spawnBlock = true;
+  eyesClearWorld();
+}
+
+// second wall (with the hole) + the winding hallway + the room at the end
+function eyesSpawnHallway(){
+  const cell = EYES_CELL;
+  const x2 = Math.round(player.x - canvas.width / 2 - 30);   // just out of sight on the left
+  const holeY = Math.round(player.y);
+  eyes.x2 = x2;
+  eyes.holeY = holeY;
+  const top = holeY - cell / 2;
+  const bot = holeY + cell / 2;
+  eyes.walls.push([x2, -100000, x2, top]);   // wall above the hole
+  eyes.walls.push([x2, bot, x2, 100000]);    // wall below the hole
+
+  const W = EYES_GRID_W, H = EYES_GRID_H;
+  const open = [];
+  for(let r = 0; r < H; r++) open.push(new Array(W).fill(false));
+  for(let i = 0; i < EYES_PATH.length - 1; i++){
+    const a = EYES_PATH[i], b = EYES_PATH[i + 1];
+    for(let c = Math.min(a[0], b[0]); c <= Math.max(a[0], b[0]); c++){
+      for(let r = Math.min(a[1], b[1]); r <= Math.max(a[1], b[1]); r++) open[r][c] = true;
+    }
+  }
+  for(let r = EYES_ROOM.r0; r <= EYES_ROOM.r1; r++){
+    for(let c = EYES_ROOM.c0; c <= EYES_ROOM.c1; c++) open[r][c] = true;
+  }
+  const isOpen = (c, r) => c >= 0 && r >= 0 && c < W && r < H && open[r][c];
+  const colX = c => x2 - (W - c) * cell;                      // left edge of a column
+  const rowY = r => top + (r - EYES_ENTRANCE.r) * cell;       // top edge of a row
+
+  for(let r = 0; r < H; r++){
+    for(let c = 0; c < W; c++){
+      if(!open[r][c]) continue;
+      const L = colX(c), R = L + cell, T = rowY(r), B = T + cell;
+      if(!isOpen(c, r - 1)) eyes.walls.push([L, T, R, T]);
+      if(!isOpen(c, r + 1)) eyes.walls.push([L, B, R, B]);
+      if(!isOpen(c - 1, r)) eyes.walls.push([L, T, L, B]);
+      if(!isOpen(c + 1, r) && !(c === EYES_ENTRANCE.c && r === EYES_ENTRANCE.r)) eyes.walls.push([R, T, R, B]);   // the entrance cell's right side is the hole
+    }
+  }
+  eyes.imgX = colX(EYES_IMAGE_CELL.c) + cell / 2;
+  eyes.imgY = rowY(EYES_IMAGE_CELL.r) + cell / 2;
+}
+
+// pushes a point out of every wall line it is too close to
+function eyesPushOut(px, py){
+  for(let pass = 0; pass < 2; pass++){
+    for(let i = 0; i < eyes.walls.length; i++){
+      const w = eyes.walls[i];
+      const loX = Math.min(w[0], w[2]), hiX = Math.max(w[0], w[2]);
+      const loY = Math.min(w[1], w[3]), hiY = Math.max(w[1], w[3]);
+      if(px < loX - EYES_R || px > hiX + EYES_R || py < loY - EYES_R || py > hiY + EYES_R) continue;
+      const cx = Math.max(loX, Math.min(hiX, px));
+      const cy = Math.max(loY, Math.min(hiY, py));
+      let dx = px - cx, dy = py - cy;
+      let d = Math.hypot(dx, dy);
+      if(d >= EYES_R) continue;
+      if(d < 0.0001){   // exactly on the line: push to the side we came from
+        if(w[0] === w[2]){ dx = (eyes.prevX >= w[0]) ? 1 : -1; dy = 0; }
+        else { dx = 0; dy = (eyes.prevY >= w[1]) ? 1 : -1; }
+        d = 1;
+      }
+      px = cx + dx / d * EYES_R;
+      py = cy + dy / d * EYES_R;
+    }
+  }
+  return [px, py];
+}
+
+// moves the player from where they were to where they wanted to go in small steps, so nothing (even a dash) goes through a wall
+function eyesCollide(){
+  let px = eyes.prevX, py = eyes.prevY;
+  const tx = player.x, ty = player.y;
+  const dist = Math.hypot(tx - px, ty - py);
+  const steps = Math.max(1, Math.min(200, Math.ceil(dist / 3)));
+  const sx = (tx - px) / steps, sy = (ty - py) / steps;
+  for(let i = 0; i < steps; i++){
+    px += sx; py += sy;
+    const r = eyesPushOut(px, py);
+    px = r[0]; py = r[1];
+  }
+  player.x = px;
+  player.y = py;
+}
+
+function eyesGoToTitle(){
+  eyes = eyesFresh();
+  keys = {};
+  bgMusic.pause();
+  bgMusic.currentTime = 0;
+  stopAllSounds();
+  gameState = "title";
+  showTitleScreen();
+}
+
+function eyesUpdate(){
+  if(!eyes.active) return;
+  if(gameState === "title"){ eyes = eyesFresh(); return; }
+  if(gameState !== "playing" || !player || !player.alive) return;
+  const now = performance.now();
+
+  // the picture was reached: black screen, then the title screen
+  if(eyes.phase === 4){
+    keys = {};
+    player.shootingHeld = false;
+    if(now - eyes.endAt > EYES_END_BLACK_MS) eyesGoToTitle();
+    return;
+  }
+
+  if(eyes.spawnBlock) eyesClearWorld();
+  eyesCollide();
+
+  const halfW = canvas.width / 2, halfH = canvas.height / 2;
+
+  // 0 -> 1: the first wall comes on screen
+  if(eyes.phase === 0 && player.x + halfW >= eyes.x1){ eyes.phase = 1; eyesBeginFade(); eyesSpawnHallway(); }
+  // 1 -> 2: the player hits the first wall
+  if(eyes.phase === 1 && player.x >= eyes.x1 - EYES_R - 3) eyes.phase = 2;
+  // 2 -> 3: the player starts going left, the second wall + hallway appear just out of sight
+  if(eyes.phase === 2 && player.x < eyes.x1 - 60){ eyes.phase = 3; }
+
+  if(eyes.phase === 3){
+    // the hole comes on screen: all music stops
+    if(!eyes.musicOff){
+      const left = player.x - halfW, right = player.x + halfW, topV = player.y - halfH, botV = player.y + halfH;
+      if(eyes.x2 >= left && eyes.x2 <= right && eyes.holeY + EYES_CELL / 2 >= topV && eyes.holeY - EYES_CELL / 2 <= botV){
+        eyes.musicOff = true;
+      }
+    }
+    // near the picture: cut to black
+    if(Math.hypot(player.x - eyes.imgX, player.y - eyes.imgY) < 36){
+      eyes.phase = 4;
+      eyes.endAt = now;
+      keys = {};
+    }
+  }
+
+  if(eyes.musicOff){
+    if(!bgMusic.paused) bgMusic.pause();
+    if(typeof bossTheme !== "undefined" && !bossTheme.paused) bossTheme.pause();
+  }
+}
+
+function eyesDrawWorld(){
+  if(!eyes.active || gameState !== "playing") return;
+  const cam = getCameraState();
+  const left = -cam.x / cam.zoom - 40;
+  const top = -cam.y / cam.zoom - 40;
+  const right = left + canvas.width / cam.zoom + 80;
+  const bottom = top + canvas.height / cam.zoom + 80;
+
+  ctx.save();
+  // the walls: plain white lines, like the follow camera border
+  ctx.strokeStyle = lightMode ? "black" : "white";
+  ctx.lineWidth = 3;
+  ctx.lineCap = "square";
+  ctx.beginPath();
+  eyes.walls.forEach(w => {
+    if(Math.max(w[0], w[2]) < left || Math.min(w[0], w[2]) > right || Math.max(w[1], w[3]) < top || Math.min(w[1], w[3]) > bottom) return;
+    ctx.moveTo(Math.max(left, Math.min(right, w[0])), Math.max(top, Math.min(bottom, w[1])));
+    ctx.lineTo(Math.max(left, Math.min(right, w[2])), Math.max(top, Math.min(bottom, w[3])));
+  });
+  ctx.stroke();
+
+  // enemies + pickups fading away
+  if(eyes.ghosts.length){
+    const a = 1 - (performance.now() - eyes.fadeStart) / EYES_FADE_MS;
+    if(a <= 0){
+      eyes.ghosts = [];
+    } else {
+      ctx.font = textSize + "px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillStyle = lightMode ? "black" : "white";
+      ctx.globalAlpha = a;
+      eyes.ghosts.forEach(g => {
+        if(!g.t) return;
+        if(g.rot){ ctx.save(); ctx.translate(g.x, g.y); ctx.rotate(g.rot); ctx.fillText(g.t, 0, 0); ctx.restore(); }
+        else ctx.fillText(g.t, g.x, g.y);
+      });
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // the picture in the middle of the last room
+  if(eyes.phase >= 3 && eyes.imgX && eyesImg.complete && eyesImg.naturalWidth > 0){
+    const w = EYES_IMG_SIZE, h = w * eyesImg.naturalHeight / eyesImg.naturalWidth;
+    ctx.drawImage(eyesImg, eyes.imgX - w / 2, eyes.imgY - h / 2, w, h);
+  }
+  ctx.restore();
+}
+
+// hook into the game loop
+const __eyesOldUpdate = update;
+update = function(time){
+  if(eyes.active && gameState === "playing" && player){ eyes.prevX = player.x; eyes.prevY = player.y; }
+  __eyesOldUpdate.apply(this, arguments);
+  eyesUpdate();
+};
+
+const __eyesOldDraw = draw;
+draw = function(){
+  __eyesOldDraw.apply(this, arguments);
+  if(eyes.active && eyes.phase === 4 && gameState === "playing"){
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // the picture slowly fades in on the black screen, in choppy steps
+    if(eyesFinalImg.complete && eyesFinalImg.naturalWidth > 0){
+      const t = Math.min(1, (performance.now() - eyes.endAt) / EYES_FINAL_FADE_MS);
+      const a = Math.floor(t * EYES_FINAL_STEPS) / EYES_FINAL_STEPS;
+      if(a > 0){
+        const s = Math.min(canvas.width * 0.8 / eyesFinalImg.naturalWidth, canvas.height * 0.8 / eyesFinalImg.naturalHeight);
+        const w = eyesFinalImg.naturalWidth * s, h = eyesFinalImg.naturalHeight * s;
+        ctx.globalAlpha = a;
+        ctx.drawImage(eyesFinalImg, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.restore();
+  }
+};
+
+// ===== EYES WIDE SHUT: AUTOMATIC START AT THE BEGINNING OF OPENWORLD GAMES =====
+const EYES_AUTO_START = true;    // true = eyeswide can happen automatically at the start of every Openworld game, false = never (the /eyeswide command still works)
+const EYES_AUTO_CHANCE = 50;     // chance in percent (0 to 100) that it happens when EYES_AUTO_START is true. 50 = 50%, 100 = every time, 0 = never
+
+// a new game always starts clean
+const __eyesOldReset = resetGame;
+resetGame = function(){
+  eyes = eyesFresh();
+  __eyesOldReset.apply(this, arguments);
+
+  // roll the dice for eyeswide (eyesStart() already refuses to run outside single player Openworld)
+  if(EYES_AUTO_START && openWorldMode && !mpPartyCode && !tutorialActive){
+    if(Math.random() * 100 < EYES_AUTO_CHANCE) eyesStart();
+  }
+};
+
+// nothing new spawns once the first wall has been seen
+const __eyesSpawnEnemy = spawnEnemy;
+spawnEnemy = function(){ if(eyes.spawnBlock) return; return __eyesSpawnEnemy.apply(this, arguments); };
+const __eyesSpawnPickup = spawnPickup;
+spawnPickup = function(){ if(eyes.spawnBlock) return; return __eyesSpawnPickup.apply(this, arguments); };
+const __eyesSpawnGun = spawnGunPickup;
+spawnGunPickup = function(){ if(eyes.spawnBlock) return; return __eyesSpawnGun.apply(this, arguments); };
+const __eyesSpawnHealth = spawnHealthKit;
+spawnHealthKit = function(){ if(eyes.spawnBlock) return; return __eyesSpawnHealth.apply(this, arguments); };
+const __eyesSpawnMagnet = spawnMagnetpickup;
+spawnMagnetpickup = function(){ if(eyes.spawnBlock) return; return __eyesSpawnMagnet.apply(this, arguments); };
+const __eyesSpawnWorm = spawnWorm;
+spawnWorm = function(){ if(eyes.spawnBlock) return; return __eyesSpawnWorm.apply(this, arguments); };
+const __eyesSpawnTree = spawnTree;
+spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply(this, arguments); };
+/* =============== END /eyeswide EVENT =============== */
 </script>
 
 </body>
