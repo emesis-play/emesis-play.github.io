@@ -88,8 +88,64 @@ style="
 // ===== SET THIS: true = game scales to fill the window (no stretching), false = normal fixed 800x600 =====
 const FULLSCREEN_MODE = true;
 
-const canvas = document.getElementById("game");
-const ctx = canvas.getContext("2d");
+const realCanvas = document.getElementById("game");
+const ctx = realCanvas.getContext("2d");
+
+// ===== RESOLUTION (render quality) =====
+// The game logic always sees an 800x600 canvas. Only the number of real pixels changes.
+const GAME_W = 800, GAME_H = 600;
+const canvas = new Proxy(realCanvas, {
+  get(t, p){
+    if(p === "width") return GAME_W;
+    if(p === "height") return GAME_H;
+    const v = t[p];
+    return typeof v === "function" ? v.bind(t) : v;
+  },
+  set(t, p, v){
+    if(p === "width" || p === "height") return true;
+    t[p] = v;
+    return true;
+  }
+});
+const RES_OPTIONS = [
+  { label: "Low (0.5x)", v: 0.5 },
+  { label: "Medium (0.75x)", v: 0.75 },
+  { label: "Standard (1x)", v: 1 },
+  { label: "High (1.5x)", v: 1.5 },
+  { label: "Ultra (2x)", v: 2 },
+  { label: "Native (match screen)", v: 0 }
+];
+let resIndex = 2;
+try {
+  const savedRes = parseInt(localStorage.getItem("emesis_res_index"), 10);
+  if(savedRes >= 0 && savedRes < RES_OPTIONS.length) resIndex = savedRes;
+} catch(err) {}
+let RES_SCALE = 1;
+function computeResScale(){
+  const v = RES_OPTIONS[resIndex].v;
+  if(v > 0) return v;
+  const fit = FULLSCREEN_MODE ? Math.min(window.innerWidth / GAME_W, window.innerHeight / GAME_H) : 1;
+  return Math.max(0.5, Math.min(3, fit * (window.devicePixelRatio || 1)));
+}
+function applyResolution(){
+  const s = computeResScale();
+  const pw = Math.round(GAME_W * s), ph = Math.round(GAME_H * s);
+  if(realCanvas.width !== pw || realCanvas.height !== ph){
+    realCanvas.width = pw;
+    realCanvas.height = ph;
+  }
+  realCanvas.style.width = GAME_W + "px";
+  realCanvas.style.height = GAME_H + "px";
+  RES_SCALE = pw / GAME_W;
+  ctx.setTransform(RES_SCALE, 0, 0, RES_SCALE, 0, 0);
+}
+function changeResolution(dir){
+  resIndex = (resIndex + dir + RES_OPTIONS.length) % RES_OPTIONS.length;
+  try { localStorage.setItem("emesis_res_index", String(resIndex)); } catch(err) {}
+  applyResolution();
+}
+window.addEventListener("resize", () => { if(RES_OPTIONS[resIndex].v === 0) applyResolution(); });
+applyResolution();
 
 // ===== MAC DETECTION =====
 // add ?mac=1 to the end of the page URL to test the Mac mode on any computer
@@ -476,6 +532,43 @@ function clampToWorldBounds(x, y) {
     x: Math.max(0, Math.min(canvas.width, x)),
     y: Math.max(0, Math.min(canvas.height, y))
   };
+}
+
+// every living player in the party (host + everyone who joined); just you when solo
+function mpAlivePlayerList(){
+  const list = [];
+  if(player && player.alive) list.push(player);
+  if(mpPartyCode && mpIsHost){
+    Object.values(remotePlayers).forEach(rp => { if(rp && rp.alive) list.push(rp); });
+  }
+  return list;
+}
+
+// random spot close to ONE specific player
+function randomPointNearPlayer(p, margin = 20){
+  if(wavesMode && boss.active) return randomPointInPlayableArea(margin);
+  const minD = 70;
+  const maxD = openWorldMode ? Math.max(240, Math.min(canvas.width, canvas.height) * 0.45) : 260;
+  const a = Math.random() * Math.PI * 2;
+  const d = minD + Math.random() * (maxD - minD);
+  let x = p.x + Math.cos(a) * d;
+  let y = p.y + Math.sin(a) * d;
+  if(!openWorldMode){
+    x = Math.max(margin, Math.min(canvas.width - margin, x));
+    y = Math.max(margin, Math.min(canvas.height - margin, y));
+  }
+  return { x, y };
+}
+
+// Calls addFn(position) once per living player in multiplayer (so more players = more pickups,
+// and every player gets the same amount near them). Solo / not hosting = one random spot like before.
+function spawnForEachPlayer(addFn, margin = 20){
+  const list = mpAlivePlayerList();
+  if(!(mpPartyCode && mpIsHost) || list.length === 0){
+    addFn(randomPointInPlayableArea(margin));
+    return;
+  }
+  list.forEach(p => addFn(randomPointNearPlayer(p, margin)));
 }
 
 function mpSpawnAnchor(){
@@ -2277,7 +2370,7 @@ function mpConnect(){
     if (gkey === "nuke") { ensureInInventory("nuke"); player.nukes=(player.nukes||0)+1; }
     else if (player.inventory.includes(gkey)) { player.ammo += 15; }
     else { ensureInInventory(gkey); }
-    player.currentGunKey = gkey;
+    if(performance.now() > magnetNoSwitchUntil) player.currentGunKey = gkey;
     playSound("https://file.garden/Zfwe_2Ig9weivlFh/pickup.wav");
   });
 
@@ -2791,18 +2884,25 @@ let cameraShakeEnabled = true;
 // ===== COLOR MODE (each enemy / pickup type gets its own color) =====
 let colorMode = false;   // off by default
 const COLOR_MODE_COLORS = {
-  enemy:      "#ff9f43",   // normal enemies (orange)
-  treeEnemy:  "#9b59ff",   // enemies that burst out of the tree (purple)
-  shooter:    "cyan",      // shooter enemies
-  gugerbird:  "#ff00ff",   // gugerbird (magenta)
-  worm:       "#ff6a00",   // worm boss (bright orange)
-  ammo:       "#ffee32",   // ammo pickups (yellow)
-  health:     "#33ff57",   // health pickups (green)
-  magnet:     "#3d7bff",   // magnet pickups (blue)
-  brick:      "red",       // bricks
-  gun:        "white",     // gun pickups on the ground
-  car:        "#8ecae6"    // cars (light blue)
+  enemy:       "#39ff14",   // normal enemies (bright green)
+  treeEnemy:   "#39ff14",   // enemies that burst out of the tree (bright green)
+  shooter:     "#00f0ff",   // shooter enemies (bright cyan)
+  gugerbird:   "#ff2fa8",   // gugerbird (hot pink)
+  worm:        "#ff8c00",   // worm boss (bright orange)
+  ammo:        "#fff000",   // ammo pickups (bright yellow)
+  health:      "#ffffff",   // health pickups (white)
+  magnet:      "#3d6dff",   // magnet pickups (bright blue)
+  brick:       "#c8793c",   // bricks (brown)
+  gun:         "white",     // fallback only - every gun gets its own color (see gunColorFor)
+  car:         "#ffc98a",   // cars (peach)
+  turret:      "#5affb4",   // turrets (mint)
+  enemyBullet: "#ff6b6b"    // enemy bullets (light red)
 };
+// every gun gets its own color: the hue is spread around the color wheel by the gun's position in the GUNS list
+function gunColorFor(key){
+  const idx = Math.max(0, Object.keys(GUNS).indexOf(key));
+  return "hsl(" + Math.round((idx * 137.5) % 360) + ",100%,62%)";
+}
 // draws text in the type's color when Color Mode is on, normal text color when it's off
 function cmText(type, text, x, y){
   if(colorMode){
@@ -3127,12 +3227,13 @@ function spawnMagnetpickup() {
 }
 
 function spawnHealthKit() {
-  const position = randomPointInPlayableArea(20);
-  healthKits.push({
-    id: nextItemId++,
-    x: position.x,
-    y: position.y
-  });
+  spawnForEachPlayer(position => {
+    healthKits.push({
+      id: nextItemId++,
+      x: position.x,
+      y: position.y
+    });
+  }, 20);
 }
 setInterval(() => { 
   if (gameState === "playing" && !tutorialActive && !isMultiplayerClient) spawnHealthKit(); 
@@ -3173,8 +3274,80 @@ document.addEventListener("keydown", (e) => {
   playSound("https://file.garden/Zfwe_2Ig9weivlFh/dropgun.wav");
 });
 
+// ===== SEE-THROUGH PAUSE FOR PLAYERS WHO JOINED A HOST (game keeps running) =====
+let mpClientMenuOpen = false;
+function mpIsJoinedClient(){ return !!(mpPartyCode && !mpIsHost && isMultiplayerClient); }
+
+function mpClientExitToTitle(){
+  mpClientMenuOpen = false;
+  if(socket && mpPartyCode){
+    const leavingSocket = socket;
+    socket = null;
+    mpPartyCode = "";
+    mpIsHost = false;
+    isMultiplayerClient = false;
+    remotePlayers = {};
+    remoteBullets = [];
+    mpHostPaused = false;
+    leavingSocket.disconnect();
+  }
+  gameState = "loading";
+  bgMusic.pause();
+  bgMusic.currentTime = 0;
+  drawLoadingScreen();
+  setTimeout(() => {
+    gameState = "title";
+    showTitleScreen();
+  }, 500);
+}
+
+function mpClientMenuKey(e){
+  if(e.key === "Escape"){
+    mpClientMenuOpen = !mpClientMenuOpen;
+    pauseSelected = 0;
+    playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
+    return;
+  }
+  if(!mpClientMenuOpen) return;
+  if(e.key === "ArrowUp"){
+    pauseSelected = (pauseSelected - 1 + pauseOptions.length) % pauseOptions.length;
+    playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
+  } else if(e.key === "ArrowDown"){
+    pauseSelected = (pauseSelected + 1) % pauseOptions.length;
+    playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
+  } else if(e.key === "Enter"){
+    playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
+    if(pauseSelected === 0) mpClientMenuOpen = false;
+    else mpClientExitToTitle();
+  }
+}
+
+function drawClientPauseMenu(){
+  if(!mpClientMenuOpen) return;
+  if(!mpIsJoinedClient() || gameState !== "playing"){ mpClientMenuOpen = false; return; }
+  const txt = lightMode ? "black" : "white";
+  ctx.save();
+  ctx.fillStyle = lightMode ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.textAlign = "center";
+  ctx.fillStyle = txt;
+  ctx.font = "24px sans-serif";
+  ctx.fillText("Paused", canvas.width/2, canvas.height/2 - 60);
+  ctx.font = "18px sans-serif";
+  pauseOptions.forEach((opt, i) => {
+    ctx.fillStyle = (i === pauseSelected) ? "yellow" : txt;
+    ctx.fillText(opt, canvas.width/2, canvas.height/2 + i * 30);
+  });
+  ctx.font = "12px sans-serif";
+  ctx.fillStyle = txt;
+  ctx.fillText("↑ ↓ to navigate, Enter to confirm, Esc to close", canvas.width/2, canvas.height/2 + 80);
+  ctx.fillText("(the game is still running)", canvas.width/2, canvas.height/2 + 100);
+  ctx.restore();
+}
+
 // Toggle pause when pressing Escape during gameplay
 document.addEventListener("keydown", e => {
+  if(mpIsJoinedClient() && gameState === "playing"){ mpClientMenuKey(e); return; }
   if(gameState === "playing" && e.key === "Escape") {
     gameState = "paused";
     pauseSelected = 0; // first option selected by default
@@ -3390,7 +3563,9 @@ const TURRET_MAX_HITS = 4;
 // ==============================
 // REAL SPAWN MAGNET FUNCTION
 // ==============================
+let magnetNoSwitchUntil = 0;   // while the magnet is active, picking up guns won't switch your held gun
 function spawnMagnet() {
+    magnetNoSwitchUntil = performance.now() + (__magnet_duration_frames / 60) * 1000 + 1000;
     // Turn magnet on
     __magnet_active = true;
     __magnet_time = __magnet_duration_frames;
@@ -4161,8 +4336,8 @@ if(choice==="Start Game"){
       return;
     }
 
-    if(e.key==="ArrowUp") { optionIndex = (optionIndex-1+8)%8; playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav"); }
-    if(e.key==="ArrowDown") { optionIndex = (optionIndex+1)%8; playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav"); }
+    if(e.key==="ArrowUp") { optionIndex = (optionIndex-1+9)%9; playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav"); }
+    if(e.key==="ArrowDown") { optionIndex = (optionIndex+1)%9; playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav"); }
 if(e.key==="Enter"){
   playSound("...menu button.wav");
   // --- Gameplay ---
@@ -4176,7 +4351,13 @@ if(e.key==="Enter"){
   // --- Audio & Visual ---
   if(optionIndex===6){ musicEnabled = !musicEnabled; bgMusic.muted = !musicEnabled; }
   if(optionIndex===7) colorMode = !colorMode;
+  if(optionIndex===8) changeResolution(1);
 }
+
+    if(optionIndex===8 && (e.key==="ArrowLeft" || e.key==="ArrowRight")){
+      changeResolution(e.key==="ArrowRight" ? 1 : -1);
+      playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
+    }
 
     if(optionIndex===5 && (e.key==="ArrowLeft" || e.key==="ArrowRight")){
       if(e.key==="ArrowRight") playerHue = (playerHue===-1) ? 0 : (playerHue+10)%360;
@@ -4464,6 +4645,15 @@ const newY = worldPosition.y;
 canvas.addEventListener("mouseup", ()=>{ mouseDown = false; });
 
 // ====== SPAWN ENEMY / PICKUPS ======
+// more players = more enemies (same formula the Waves mode already uses): 1 player = 1x, 2 = 1.6x, 3 = 2.2x ...
+const OPEN_WORLD_ENEMY_BOOST = 2.5;   // 1 = normal, 2 = double, 3 = triple spawn rate in Openworld mode
+
+function mpEnemyMult(){
+  const owBoost = openWorldMode ? OPEN_WORLD_ENEMY_BOOST : 1;
+  if(!(mpPartyCode && mpIsHost)) return owBoost;
+  return owBoost * (1 + 0.6 * Object.keys(remotePlayers).length);
+}
+
 function spawnEnemy(){
   const position = randomEnemySpawnPoint();
   const bird =
@@ -4483,10 +4673,10 @@ function spawnEnemy(){
 }
 
 function spawnPickup(){
-  // Ammo pickup (existing)
-  // keep it fairly central but random
-const position = randomPointInPlayableArea(20);
-pickups.push({id: nextItemId++, x: position.x, y: position.y});
+  // Ammo pickup: one near every living player in multiplayer
+  spawnForEachPlayer(position => {
+    pickups.push({id: nextItemId++, x: position.x, y: position.y});
+  }, 20);
 }
 
 // spawn ammo every 5 seconds (existing behavior)
@@ -6872,6 +7062,7 @@ function update(time){
     // ===== normal gameplay updates only when playing =====
     if (gameState !== "playing") return;
    if (mpHostPaused && isMultiplayerClient) return; // host is paused — freeze until they resume
+   if (mpClientMenuOpen && mpIsJoinedClient()) { keys = {}; mouseDown = false; if(player) player.shootingHeld = false; }  // menu open: you stand still
    updateMagnet();
    hostCheckPickupCollisions();
    Object.values(remotePlayers).forEach(rp=>{
@@ -8596,7 +8787,7 @@ bricks.forEach((b, bi) => {
       } else {
         ensureInInventory(g.gunKey);
       }
-      player.currentGunKey = g.gunKey;
+      if(performance.now() > magnetNoSwitchUntil) player.currentGunKey = g.gunKey;
       gunPickups.splice(gi,1);
       playSound("https://file.garden/Zfwe_2Ig9weivlFh/pickup.wav");
       if(isMultiplayerClient && g.id !== undefined){
@@ -8727,7 +8918,7 @@ for (let i = explosionRings.length - 1; i >= 0; i--) {
 
   if(wavesActive()){
     updateWaves();
-  } else if(!tutorialActive && !isMultiplayerClient && time - lastSpawn > spawnDelay){
+  } else if(!tutorialActive && !isMultiplayerClient && time - lastSpawn > spawnDelay / mpEnemyMult()){
     spawnEnemy();
     lastSpawn = time;
     spawnDelay = Math.max(minSpawnDelay, spawnDelay * spawnAccel);
@@ -8961,8 +9152,8 @@ function wavesStart(n){
   wv.state = "active";
   const d = n > 10 ? 10 + (n - 10) * 0.35 : n;   // slower difficulty growth after wave 10
   wv.toSpawn = Math.floor((7 + d * 2.5) * (1 + 0.6 * Object.keys(remotePlayers).length));
-  wv.toSpawnShooters = n >= 4 ? Math.floor((d - 1) / 2) : 0;
-  wv.spawnEvery = Math.max(28, 72 - 5 * d);
+  wv.toSpawnShooters = n >= 4 ? Math.floor(((d - 1) / 2) * mpEnemyMult()) : 0;
+  wv.spawnEvery = Math.max(12, Math.round(Math.max(28, 72 - 5 * d) / mpEnemyMult()));
   const total = wv.toSpawn + wv.toSpawnShooters;
   wavesBanner("WAVE " + n, total + " enemies", 150);
   // ammo drops so every wave is winnable (each pickup = 5 ammo)
@@ -9873,6 +10064,7 @@ function drawWavesBlurb(){
 
 // ====== DRAW ======
 function draw(){
+  ctx.setTransform(RES_SCALE, 0, 0, RES_SCALE, 0, 0);   // resolution scale
   // Clear the screen
   renderBoss3D();
   if (bossLayerOn() && !(invertTimer > 0 || nukeFlashCount > 0 || nukeFlashAlpha > 0)) {
@@ -10190,11 +10382,12 @@ ctx.restore();
         ]},
         { title: "Audio & Visual", items: [
             "Game Music: " + (musicEnabled ? "ON" : "OFF"),
-            "Color Mode: " + (colorMode ? "ON" : "OFF")
+            "Color Mode: " + (colorMode ? "ON" : "OFF"),
+            "Resolution: ◄ " + RES_OPTIONS[resIndex].label + " ►"
         ]}
     ];
 
-    let optY = canvas.height / 2 - 175;
+    let optY = canvas.height / 2 - 200;
     let optI = 0;
     let swatchY = 0;
     optionGroups.forEach(group => {
@@ -10235,6 +10428,7 @@ ctx.restore();
     let optHint;
     if(optionIndex === 3)       optHint = "Enter = open the pistol editor";
     else if(optionIndex === 5)  optHint = "← → = change color  |  Enter = reset color to default";
+    else if(optionIndex === 8)  optHint = "← → or Enter = change resolution (Native = sharpest, Low = fastest)";
     else                        optHint = "Enter = toggle ON / OFF";
 
     ctx.font = "12px sans-serif";
@@ -10706,6 +10900,7 @@ else {
         ctx.translate(b.x, b.y);
         ctx.rotate(Math.atan2(b.dy, b.dx) + Math.PI);   // circle end leads
         ctx.scale(BOSS_BULLET_LEN / gw, BOSS_BULLET_LEN / gw);
+        if (colorMode) ctx.fillStyle = COLOR_MODE_COLORS.enemyBullet;
         ctx.fillText(BOSS_BULLET_GLYPH, 0, 0);
         ctx.restore();
       } else {
@@ -10716,6 +10911,7 @@ else {
           ctx.textBaseline = "middle";
           ctx.translate(b.x, b.y);
           ctx.rotate(performance.now() / 90 + (b.nid || 0));
+          if (colorMode) ctx.fillStyle = COLOR_MODE_COLORS.enemyBullet;
           ctx.fillText(symbol, 0, 0);
           ctx.restore();
         } else {
@@ -10792,6 +10988,7 @@ else {
 ctx.save();
 ctx.font = "14px monospace";
 ctx.textAlign = "center";
+if (colorMode) ctx.fillStyle = COLOR_MODE_COLORS.turret;
 
 activeTurrets.forEach(t => {
   // base
@@ -10851,7 +11048,7 @@ gunPickups.forEach(g=>{
 
   if (g.rotation) ctx.rotate(g.rotation); // ✅ apply rotation
 
-  if (colorMode) ctx.fillStyle = COLOR_MODE_COLORS.gun;
+  if (colorMode) ctx.fillStyle = gunColorFor(g.gunKey);
   ctx.fillText(g.glyph, 0, 0);
   ctx.restore();
 });
@@ -11153,6 +11350,7 @@ if (window.nukeFlashA > 0) {
   ctx.restore();
 }
 drawHostPausedOverlay();
+drawClientPauseMenu();
 drawDeathMessages();
 drawRevivePrompt();
 drawNewHighScore();
@@ -12950,7 +13148,7 @@ draw = function(){
   __eyesOldDraw.apply(this, arguments);
   if(eyes.active && eyes.phase === 4 && gameState === "playing"){
     ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.setTransform(RES_SCALE, 0, 0, RES_SCALE, 0, 0);
     ctx.globalAlpha = 1;
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
