@@ -383,6 +383,7 @@ let flashOnShoot = true; // NEW: toggle for muzzle flash / screen flash
 let gameModeOptions = ["Classic", "Openworld", "Followcamera", "Waves"];
 const mpGameModeOptions = ["Classic", "Openworld", "Followcamera", "Waves"];
 let wavesMode = false;
+let playerMode = false;
 let newblood = true;   // true = new smooth blood burst, false = old blood
 let selectedGameMode = 0;
 
@@ -397,13 +398,15 @@ const modeImages = {
   Waves: new Image(),
   Classic: new Image(),
   Openworld: new Image(),
-  Followcamera: new Image()
+  Followcamera: new Image(),
+  Player: new Image()
 };
 
 modeImages.Classic.src = "https://file.garden/Zfwe_2Ig9weivlFh/classic.png"
 modeImages.Openworld.src = "https://file.garden/Zfwe_2Ig9weivlFh/openworld.png"
 modeImages.Followcamera.src = "https://file.garden/Zfwe_2Ig9weivlFh/follow.png"
 modeImages.Waves.src = "https://file.garden/Zfwe_2Ig9weivlFh/waves.png"
+modeImages.Player.src = "https://file.garden/Zfwe_2Ig9weivlFh/jessface.png"
 
 function isCameraActive() {
   return followCameraMode || openWorldMode;
@@ -757,7 +760,8 @@ let mpDownedPlayers = {};          // id -> { x, y, name, color, at }  (other pl
 let mpReviveTarget = null;         // id of the downed player I'm standing next to
 let mpReviveProgress = 0;          // 0..1, the white bar
 const MP_REVIVE_RANGE = 45;        // how close you have to stand to a downed player
-const MP_REVIVE_PER_PRESS = 0.14;  // each F press fills this much of the bar
+const MP_REVIVE_PER_PRESS = 0.24;   // 5 presses now (was 4)
+let mpBeingRevivedUntil = 0;        // while this is in the future, a teammate is reviving ME  // each F press fills this much of the bar
 const MP_REVIVE_DECAY = 0.5;       // the bar drains this much per second (so you have to spam fast)
 const MP_DOWN_SHAKE_MS = 900;      // how long the body shakes before the X shows up
 const MP_REVIVE_PRESS_SOUND = "https://file.garden/Zfwe_2Ig9weivlFh/revive_pump.wav";  // <-- PASTE YOUR SOUND LINK BETWEEN THE QUOTES (plays on every revive press)
@@ -789,7 +793,12 @@ function mpGoDown(){
   player.dashing = false;
   player.dashTarget = null;
   player.dashSwordSpin = false;
-  mpDeathCamUntil = Infinity;   // camera stays on my body instead of spectating
+  // camera stays on my body while it shakes, then I can spectate the other players while waiting to be revived
+  mpDeathCamUntil = performance.now() + MP_DOWN_SHAKE_MS;
+  mpSpecCamX = null;
+  mpSpecCamY = null;
+  mpSpecLostAt = 0;
+  mpSpectateId = null;
   playSound("https://file.garden/Zfwe_2Ig9weivlFh/death.wav");
   mpAddSaveMsg(mpUsername || "You");
   if(socket) socket.emit("bulletFired", { id: socket.id, x: mpR(player.x), y: mpR(player.y), dx: 0, dy: 0, dn: 1, name: mpUsername, color: playerColorValue() || undefined, lv: mpLives });
@@ -824,6 +833,7 @@ document.addEventListener("keydown", (e) => {
   if(mpHostPaused && isMultiplayerClient) return;
   e.mpRevivePress = true;   // tells the drop-ammo key not to fire on this same press
   if(MP_REVIVE_PRESS_SOUND) playSound(MP_REVIVE_PRESS_SOUND);
+  if(socket) socket.emit("bulletFired", { id: socket.id, x: 0, y: 0, dx: 0, dy: 0, rvg: mpReviveTarget });   // tells the downed player they're being revived
   mpReviveProgress = Math.min(1, mpReviveProgress + MP_REVIVE_PER_PRESS);
   if(mpReviveProgress >= 1){
     const id = mpReviveTarget;
@@ -2120,6 +2130,11 @@ function mpConnect(){
   socket.on("enemyState", (data) => {
     if(mpIsHost) return; // host is authoritative — ignore our own reflected data
 
+    // host sent everyone back to the party lobby
+    if(data.backToParty){
+      mpGoToLobby();
+      return;
+    }
     // host pressed Retry on the game over screen
     if(data.retry){
       if(gameState === "gameover" || gameState === "playing" || gameState === "paused") mpRestartRun();
@@ -2544,6 +2559,7 @@ function mpConnect(){
       return;
     }
     if(data.rvd){ delete mpDownedPlayers[data.id]; return; }
+    if(data.rvg !== undefined){ if(socket && data.rvg === socket.id && mpDowned) mpBeingRevivedUntil = performance.now() + 900; return; }
     if(data.rv !== undefined){ if(socket && data.rv === socket.id && mpDowned) mpReviveSelf(); return; }
     if(data.hurt){ mpRemoteBlood(data.x, data.y); return; }
     if(data.nblood){ spawnNewBlood(data.x, data.y, data.a || 0, true); return; }
@@ -2555,7 +2571,7 @@ function mpConnect(){
       remoteBullets.push({ x: data.x, y: data.y, dx: data.dx, dy: data.dy, trail: [], life: 90, bouncesLeft: 3 });
     } else if(data.bnc){
       // doublebarrel pellet that bounces off the walls once
-      remoteBullets.push({ x: data.x, y: data.y, dx: data.dx, dy: data.dy, trail: [], life: 90, bouncesLeft: data.bnc, wallOnly: true });
+      remoteBullets.push({ x: data.x, y: data.y, dx: data.dx, dy: data.dy, trail: [], life: 90, bouncesLeft: data.bnc, wallOnly: true, bnd: openWorldMode ? { l: data.x - canvas.width / 2, r: data.x + canvas.width / 2, t: data.y - canvas.height / 2, b: data.y + canvas.height / 2 } : undefined });
     } else if(data.rocket){
       remoteBullets.push({ x: data.x, y: data.y, dx: data.dx, dy: data.dy, trail: [], life: 300, isRocket: true });
       playSound("https://file.garden/Zfwe_2Ig9weivlFh/rocket%20launcher%20shoot.wav");
@@ -2866,6 +2882,40 @@ function mpRestartRun(){
   bgMusic.currentTime = 0;
   bgMusic.play().catch(()=>{});
 }
+// ===== BACK TO PARTY =====
+// puts THIS player back on the party lobby screen (used by the host and by every client)
+function mpGoToLobby(){
+  bgMusic.pause();
+  bgMusic.currentTime = 0;
+  gameOverMusic.pause();
+  gameOverMusic.currentTime = 0;
+  stopAllSounds();
+  mpVomits.forEach(v => { if(v.img) v.img.remove(); });
+  mpVomits = [];
+  mpHostPaused = false;
+  mpAutoPaused = false;
+  mpClientMenuOpen = false;
+  mpClientCountdownStart = 0;
+  mpCountdownStart = 0;
+  if(mpCountdownTimer){ clearTimeout(mpCountdownTimer); mpCountdownTimer = null; }
+  isMultiplayerClient = false;
+  remotePlayers = {};
+  remoteBullets = [];
+  keys = {};
+  if(player) player.shootingHeld = false;
+  const dg = document.getElementById("deathGif");
+  if(dg) dg.style.display = "none";
+  mpEditingName = false;
+  gameState = "mplobby";
+  playTitleMusic();
+}
+// host only: tells everyone to go back to the lobby, then goes there too
+function mpHostBackToParty(){
+  if(!(socket && mpPartyCode && mpIsHost)) return;
+  socket.emit("enemyState", { backToParty: 1 });
+  mpGoToLobby();
+}
+
 function mpHostRetry(){
   if(!(socket && mpPartyCode && mpIsHost)) return;
   socket.emit("enemyState", { retry: 1 });   // everyone else restarts too
@@ -2908,6 +2958,7 @@ function cmText(type, text, x, y){
   if(colorMode){
     ctx.save();
     ctx.fillStyle = COLOR_MODE_COLORS[type];
+    if(type === "enemy" || type === "treeEnemy" || type === "shooter") ctx.font = "bold " + ctx.font;
     ctx.fillText(text, x, y);
     ctx.restore();
   } else {
@@ -3119,6 +3170,15 @@ let glyphEditText = "";
 // ===== PAUSE MENU SETUP =====
 const pauseOptions = ["Resume", "Exit to Title"];
 let pauseSelected = 0;
+// the host of a multiplayer game gets an extra "Back to Party" button (the list is updated in place)
+setInterval(() => {
+  const want = (mpPartyCode && mpIsHost) ? ["Resume", "Back to Party", "Exit to Title"] : ["Resume", "Exit to Title"];
+  if(pauseOptions.length !== want.length || pauseOptions.some((o, i) => o !== want[i])){
+    pauseOptions.length = 0;
+    want.forEach(o => pauseOptions.push(o));
+    pauseSelected = 0;
+  }
+}, 50);
 
 function handleConsoleCommand(cmd) {
     if (cmd.trim().toLowerCase().startsWith("/revive")) {
@@ -3147,6 +3207,11 @@ function handleConsoleCommand(cmd) {
     if (cmd.trim().toLowerCase() === "/eyeswide") {
         window.lastConsoleCommand = null;
         if (mpCheatsAllowed()) eyesStart();
+        return;
+    }
+    if (cmd.trim().toLowerCase() === "/playergamemode") {
+        window.lastConsoleCommand = null;
+        unlockPlayerMode();
         return;
     }
     if (cmd.trim().toLowerCase() === "/jessmode") {
@@ -3218,6 +3283,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 function spawnMagnetpickup() {
+  if(playerActive()) return;
   const position = randomPointInPlayableArea(20);
   Magnetpickup.push({
     id: nextItemId++,
@@ -3227,6 +3293,7 @@ function spawnMagnetpickup() {
 }
 
 function spawnHealthKit() {
+  if(playerActive()) return;
   spawnForEachPlayer(position => {
     healthKits.push({
       id: nextItemId++,
@@ -3376,7 +3443,10 @@ document.addEventListener("keydown", e => {
           gameState = "playing";
           if (!tutorialActive) bgMusic.play();
         }   // 🔊 Resume music (skip in tutorial)
-      } else if(pauseSelected === 1) {
+      } else if(pauseOptions[pauseSelected] === "Back to Party") {
+        // host: send everyone back to the party lobby
+        mpHostBackToParty();
+      } else if(pauseOptions[pauseSelected] === "Exit to Title") {
         // Exit to title screen: show loading first
         if(socket && mpPartyCode){
           // leaving a multiplayer game: drop the connection so everyone else is told
@@ -3892,7 +3962,7 @@ gravitygun: {
   holdDistance: 85,        // how far in front of you they float
   maxHeld: 12,             // most enemies it can hold at once
   launchSpeed: 24,         // how fast they get launched
-  maxBounces: 2,           // wall bounces before the launch ends
+  maxBounces: 3,           // wall bounces before the launch ends
   wallDamage: 50,          // damage per wall hit (health-bar enemies / Instakill OFF)
   recoilStrength: 10,
   recoilBack: 8,
@@ -4082,6 +4152,7 @@ function resetGame(){
   lastGunSpawnTime = performance.now();
   autoAimAngle = 0;
   wavesReset();
+  playerBotReset();
 }
 
 
@@ -4246,6 +4317,7 @@ if(choice==="Start Game"){
       const selectedMode = gameModeOptions[selectedGameMode];
 
       wavesMode = selectedMode === "Waves";
+      playerMode = selectedMode === "Player";
       openWorldMode = selectedMode === "Openworld";
       followCameraMode =
         selectedMode === "Followcamera" ||
@@ -4477,7 +4549,16 @@ if(e.key==="Enter"){
   }
 else if(gameState==="gameover"){
   if(e.key==="ArrowUp" || e.key==="ArrowDown" || e.key==="ArrowLeft" || e.key==="ArrowRight"){
-    if(!mpPartyCode || mpIsHost) goSel = goSel === 0 ? 1 : 0;   // joining players only have "Back to title"
+    if(mpPartyCode && mpIsHost){
+      // host in multiplayer: Retry -> Back to party -> Back to title
+      const goOrder = [0, 2, 1];
+      let gi = goOrder.indexOf(goSel);
+      if(gi === -1) gi = 0;
+      const goStep = (e.key === "ArrowUp" || e.key === "ArrowLeft") ? -1 : 1;
+      goSel = goOrder[(gi + goStep + goOrder.length) % goOrder.length];
+    } else if(!mpPartyCode){
+      goSel = goSel === 0 ? 1 : 0;   // single player: Retry / Back to title
+    }
     playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
   }
   else if(e.key==="Enter" && performance.now() - gameOverStart > 300){
@@ -4485,6 +4566,9 @@ else if(gameState==="gameover"){
     if(goSel === 0 && mpPartyCode && mpIsHost){
       // MULTIPLAYER RETRY (host only): restarts the game for everyone
       mpHostRetry();
+    } else if(goSel === 2 && mpPartyCode && mpIsHost){
+      // BACK TO PARTY (host only): everyone goes back to the lobby
+      mpHostBackToParty();
     } else if(goSel === 0 && !mpPartyCode){
       // RETRY: same mode and settings, skips the intro
       gameOverMusic.pause();
@@ -4646,8 +4730,8 @@ canvas.addEventListener("mouseup", ()=>{ mouseDown = false; });
 
 // ====== SPAWN ENEMY / PICKUPS ======
 // more players = more enemies (same formula the Waves mode already uses): 1 player = 1x, 2 = 1.6x, 3 = 2.2x ...
-const OPEN_WORLD_ENEMY_BOOST = 2.5;   // 1 = normal, 2 = double, 3 = triple spawn rate in Openworld mode
-
+const OPEN_WORLD_ENEMY_BOOST = 1.5;   // 1 = normal, 2 = double, 3 = triple spawn rate in Openworld mode
+// BOOOST
 function mpEnemyMult(){
   const owBoost = openWorldMode ? OPEN_WORLD_ENEMY_BOOST : 1;
   if(!(mpPartyCode && mpIsHost)) return owBoost;
@@ -4655,6 +4739,7 @@ function mpEnemyMult(){
 }
 
 function spawnEnemy(){
+  if(playerActive()) return;
   const position = randomEnemySpawnPoint();
   const bird =
     egyptianBirds[Math.floor(Math.random() * egyptianBirds.length)];
@@ -4673,6 +4758,7 @@ function spawnEnemy(){
 }
 
 function spawnPickup(){
+  if(playerActive()) return;
   // Ammo pickup: one near every living player in multiplayer
   spawnForEachPlayer(position => {
     pickups.push({id: nextItemId++, x: position.x, y: position.y});
@@ -4704,6 +4790,7 @@ function distanceToLine(px, py, x1, y1, x2, y2) {
 
 // ====== GUN PICKUPS ======
 function spawnGunPickup() {
+  if(playerActive()) return;
     if (isMultiplayerClient) return;   // only the host spawns guns; client-made ones vanish on the next sync
 
     // pick a weighted-random gun (never pistol) — rarer guns show up less often
@@ -4732,6 +4819,7 @@ gy = position.y;
 }
 
 function spawnWorm() {
+  if(playerActive()) return;
     if (worms.length > 0) return;
 
     const speed = 1.5;
@@ -4848,7 +4936,7 @@ function drawWorms() {
     ctx.save();
     ctx.font = "18px monospace";
     ctx.textAlign = "center";
-    if (colorMode) ctx.fillStyle = COLOR_MODE_COLORS.worm;
+    if (colorMode){ ctx.fillStyle = COLOR_MODE_COLORS.worm; ctx.font = "bold 18px monospace"; }
 
     worms.forEach(w => {
 
@@ -5827,6 +5915,152 @@ function updateBlackHoleParticles(){
 // Enemies with a health bar (shooters, gugerbird, or everyone when Instakill is OFF)
 // take damage on every wall hit instead.
 // ============================================================
+// ===== GRAVITY GUN SOUNDS =====
+const GRAV_GRAB_SND  = "https://file.garden/Zfwe_2Ig9weivlFh/Gravitygun_Grab.wav";
+const GRAV_HOLD_SND  = "https://file.garden/Zfwe_2Ig9weivlFh/Gravitygun_hold.wav";
+const GRAV_SHOOT_SND = "https://file.garden/Zfwe_2Ig9weivlFh/Gravitygun_shoot.wav";
+const GRAV_WALL_SND  = "https://file.garden/Zfwe_2Ig9weivlFh/enemy_hitwall.wav";
+const GRAV_BEEP_SND  = "https://file.garden/Zfwe_2Ig9weivlFh/gravitygun_beaping.wav";
+// fallback (only used until the gapless version has finished loading)
+let gravHoldAudio = new Audio(GRAV_HOLD_SND);
+gravHoldAudio.loop = true;
+
+// gapless looping hold sound (Web Audio API)
+const GRAV_CTX = (window.AudioContext || window.webkitAudioContext) ? new (window.AudioContext || window.webkitAudioContext)() : null;
+let gravHoldBuf = null;
+let gravHoldSrc = null;
+if(GRAV_CTX){
+  fetch(GRAV_HOLD_SND).then(r => r.arrayBuffer())
+    .then(d => new Promise((res, rej) => GRAV_CTX.decodeAudioData(d, res, rej)))
+    .then(buf => { gravHoldBuf = buf; })
+    .catch(() => { gravHoldBuf = null; });
+}
+// let the fallback hold sound change pitch too
+try { gravHoldAudio.preservesPitch = false; gravHoldAudio.mozPreservesPitch = false; gravHoldAudio.webkitPreservesPitch = false; } catch(e) {}
+
+// gapless looping beeping sound (plays when you're holding the max amount)
+let gravBeepBuf = null;
+let gravBeepSrc = null;
+let gravBeepFallback = new Audio(GRAV_BEEP_SND);
+gravBeepFallback.loop = true;
+if(GRAV_CTX){
+  fetch(GRAV_BEEP_SND).then(r => r.arrayBuffer())
+    .then(d => new Promise((res, rej) => GRAV_CTX.decodeAudioData(d, res, rej)))
+    .then(buf => { gravBeepBuf = buf; })
+    .catch(() => { gravBeepBuf = null; });
+}
+
+// rate: 1 = normal pitch, higher = more high pitched
+function gravHoldStart(rate){
+  if(rate === undefined) rate = 1;
+  if(GRAV_CTX && gravHoldBuf){
+    if(!gravHoldAudio.paused){ gravHoldAudio.pause(); try { gravHoldAudio.currentTime = 0; } catch(e) {} }
+    if(!gravHoldSrc){
+      if(GRAV_CTX.state === "suspended") GRAV_CTX.resume();
+      gravHoldSrc = GRAV_CTX.createBufferSource();
+      gravHoldSrc.buffer = gravHoldBuf;
+      gravHoldSrc.loop = true;
+      gravHoldSrc.connect(gravHoldGain);
+      gravHoldSrc.playbackRate.value = rate;
+      gravHoldSrc.start(0);
+    } else {
+      gravHoldSrc.playbackRate.setTargetAtTime(rate, GRAV_CTX.currentTime, 0.05);
+    }
+  } else {
+    gravHoldAudio.playbackRate = rate;
+    if(gravHoldAudio.paused) gravHoldAudio.play().catch(() => {});
+  }
+}
+function gravHoldStop(){
+  if(gravHoldSrc){ try { gravHoldSrc.stop(); } catch(e) {} gravHoldSrc = null; }
+  if(!gravHoldAudio.paused){ gravHoldAudio.pause(); try { gravHoldAudio.currentTime = 0; } catch(e) {} }
+}
+function gravBeepStart(){
+  if(GRAV_CTX && gravBeepBuf){
+    if(!gravBeepFallback.paused){ gravBeepFallback.pause(); try { gravBeepFallback.currentTime = 0; } catch(e) {} }
+    if(gravBeepSrc) return;
+    if(GRAV_CTX.state === "suspended") GRAV_CTX.resume();
+    gravBeepSrc = GRAV_CTX.createBufferSource();
+    gravBeepSrc.buffer = gravBeepBuf;
+    gravBeepSrc.loop = true;
+    gravBeepSrc.connect(gravBeepGain);
+    gravBeepSrc.start(0);
+  } else if(gravBeepFallback.paused){
+    gravBeepFallback.play().catch(() => {});
+  }
+}
+function gravBeepStop(){
+  if(gravBeepSrc){ try { gravBeepSrc.stop(); } catch(e) {} gravBeepSrc = null; }
+  if(!gravBeepFallback.paused){ gravBeepFallback.pause(); try { gravBeepFallback.currentTime = 0; } catch(e) {} }
+}
+// ===== GRAVITY GUN VOLUME =====
+// 1.0 = full volume, 0.6 = a little quieter, 0.3 = much quieter
+const GRAV_VOLUME = 0.6;
+
+// volume controls for the two looping sounds
+const gravHoldGain = GRAV_CTX ? GRAV_CTX.createGain() : null;
+const gravBeepGain = GRAV_CTX ? GRAV_CTX.createGain() : null;
+if(GRAV_CTX){
+  gravHoldGain.gain.value = GRAV_VOLUME;
+  gravBeepGain.gain.value = GRAV_VOLUME;
+  gravHoldGain.connect(GRAV_CTX.destination);
+  gravBeepGain.connect(GRAV_CTX.destination);
+}
+gravHoldAudio.volume = GRAV_VOLUME;
+gravBeepFallback.volume = GRAV_VOLUME;
+
+// one-shot sounds (grab / shoot / wall hit) with the same volume
+const gravOneShotBufs = {};
+function gravLoadOneShot(url){
+  if(!GRAV_CTX || gravOneShotBufs[url]) return;
+  gravOneShotBufs[url] = "loading";
+  fetch(url).then(r => r.arrayBuffer())
+    .then(d => new Promise((res, rej) => GRAV_CTX.decodeAudioData(d, res, rej)))
+    .then(buf => { gravOneShotBufs[url] = buf; })
+    .catch(() => { gravOneShotBufs[url] = "failed"; });
+}
+gravLoadOneShot(GRAV_GRAB_SND);
+gravLoadOneShot(GRAV_SHOOT_SND);
+gravLoadOneShot(GRAV_WALL_SND);
+function gravPlayOnce(url){
+  const b = gravOneShotBufs[url];
+  if(GRAV_CTX && b && b !== "loading" && b !== "failed"){
+    if(GRAV_CTX.state === "suspended") GRAV_CTX.resume();
+    const src = GRAV_CTX.createBufferSource();
+    const gn = GRAV_CTX.createGain();
+    gn.gain.value = GRAV_VOLUME;
+    src.buffer = b;
+    src.connect(gn);
+    gn.connect(GRAV_CTX.destination);
+    src.start(0);
+    return;
+  }
+  const a = new Audio(url);
+  a.volume = GRAV_VOLUME;
+  a.play().catch(() => {});
+}
+
+let gravPrevHeld = 0;
+// call every frame with how many enemies YOU are holding right now
+function gravitySoundUpdate(myHeld){
+  const playingNow = (gameState === "playing");
+  // grab sound: plays when you pick up something new
+  if(playingNow && myHeld > gravPrevHeld) gravPlayOnce(GRAV_GRAB_SND);
+  gravPrevHeld = myHeld;
+  // hold sound: loops while you're holding something
+  const holdingNow = playingNow && myHeld > 0 && player && player.alive && player.gravityOn;
+  if(holdingNow){
+    const maxHeldSnd = (GUNS.gravitygun && GUNS.gravitygun.maxHeld) ? GUNS.gravitygun.maxHeld : 12;
+    const fill = Math.min(1, myHeld / maxHeldSnd);
+    gravHoldStart(1 + fill * 0.6);          // 1.0 = normal pitch, 1.6 = pitch at max enemies held
+    if(myHeld >= maxHeldSnd) gravBeepStart();
+    else gravBeepStop();
+  } else {
+    gravHoldStop();
+    gravBeepStop();
+  }
+}
+
 function gravityBounds(){
   if(openWorldMode && player){
     return { l: player.x - canvas.width/2, r: player.x + canvas.width/2, t: player.y - canvas.height/2, b: player.y + canvas.height/2 };
@@ -5872,7 +6106,7 @@ function gravityWallHit(e, g){
   const nowS = performance.now();
   if(!window.gravHitSoundLast || nowS - window.gravHitSoundLast > 80){
     window.gravHitSoundLast = nowS;
-    playSound("https://file.garden/Zfwe_2Ig9weivlFh/car%20hit%20impactful.wav");
+    gravPlayOnce(GRAV_WALL_SND);
   }
 
   if(tough){
@@ -5998,6 +6232,7 @@ function updateGravityGunClient(){
   }
   if(!hold) player.gravityDry = false;
   player.gravityFill = (hold && player.gravityOn) ? myHeld / g.maxHeld : 0;
+  gravitySoundUpdate(myHeld);
 
   if(!hold && player.gravityOn){
     player.gravityOn = false;
@@ -6005,6 +6240,7 @@ function updateGravityGunClient(){
     if(eq && myHeld > 0 && consumeAmmo(g.launchAmmo)) launched = true;
     mpSendGravity(false, launched, aim);
     if(launched){
+      gravPlayOnce(GRAV_SHOOT_SND);
       shootKick(g);
       if(flashOnShoot){ spawnMuzzleFlash(aim, true); flashAlpha = 1; }
       gravitySpawnBurst(player.x + Math.cos(aim) * g.holdDistance, player.y + Math.sin(aim) * g.holdDistance, aim);
@@ -6036,6 +6272,7 @@ function updateGravityGun(){
     id: mpMyGravId(), x: player.x, y: player.y, aim: myAim, holding: myHold, st: player,
     tryLaunch: () => myEq && consumeAmmo(g.launchAmmo),
     onLaunch: (hx, hy, la) => {
+      gravPlayOnce(GRAV_SHOOT_SND);
       shootKick(g);
       if(flashOnShoot){ spawnMuzzleFlash(la, true); flashAlpha = 1; }
       gravitySpawnBurst(hx, hy, la);
@@ -6062,6 +6299,14 @@ function updateGravityGun(){
   }
 
   users.forEach(u => gravityTick(u, all, g));
+
+  // grab + hold sounds for ME
+  {
+    const myId = mpMyGravId();
+    let myHeldNow = 0;
+    all.forEach(e => { if(e.gravity === "held" && e.gOwner === myId) myHeldNow++; });
+    gravitySoundUpdate(myHeldNow);
+  }
 
   // anything held by somebody who left / died / switched away just drops
   const ids = new Set(users.map(u => u.id));
@@ -6706,6 +6951,7 @@ function ejectShell(angle, type){
   });
 }
 function spawnTree() {
+  if(playerActive()) return;
 
     // prevent duplicate trees
     if (treeExists || tree) return;
@@ -7596,7 +7842,7 @@ if (Math.abs(diff) < 0.1 && t.cooldown <= 0) {
     b.x += b.dx;
     b.y += b.dy;
 
-    if ((b.isMachineGun || (b.bounceWalls && !openWorldMode)) && b.bouncesLeft > 0) {
+    if ((b.isMachineGun || b.bounceWalls) && b.bouncesLeft > 0) {
       let bLeft = 0, bRight = canvas.width, bTop = 0, bBottom = canvas.height;
       if (openWorldMode && player) {
         bLeft = player.x - canvas.width / 2;
@@ -7637,13 +7883,19 @@ if (Math.abs(diff) < 0.1 && t.cooldown <= 0) {
     const rb = remoteBullets[i];
     rb.x += rb.dx;
     rb.y += rb.dy;
-    if (rb.bouncesLeft > 0 && !(rb.wallOnly && openWorldMode)) {
+    if (rb.bouncesLeft > 0) {
       let rbLeft = 0, rbRight = canvas.width, rbTop = 0, rbBottom = canvas.height;
       if (openWorldMode && player) {
         rbLeft = rbView.x - canvas.width / 2;
         rbRight = rbView.x + canvas.width / 2;
         rbTop = rbView.y - canvas.height / 2;
         rbBottom = rbView.y + canvas.height / 2;
+      }
+      if (rb.bnd) {   // double barrel pellets use the walls around the shooter
+        rbLeft = rb.bnd.l;
+        rbRight = rb.bnd.r;
+        rbTop = rb.bnd.t;
+        rbBottom = rb.bnd.b;
       }
       if (rb.x <= rbLeft || rb.x >= rbRight) {
         rb.dx *= -1;
@@ -8481,8 +8733,10 @@ if (tree) {
         if (tree.bar <= 0) {
 
             playSound("https://file.garden/Zfwe_2Ig9weivlFh/tree_death_loud.mp3");
-            treeBarUpSound.pause();
-            treeBarUpSound.currentTime = 0;
+    treeBarUpSound.pause();
+    gravHoldStop();
+    gravBeepStop();
+    bgMusic.pause();
 
             tree.state = "broken";
 
@@ -8597,8 +8851,10 @@ if (tree) {
     }
 }
 // --- ♀ shooter enemies appear after 70 seconds ---
-if (survivalSecs > 85 && !tutorialActive && !isMultiplayerClient && !wavesMode) {
-  if (Math.random() < 0.001) {
+if (survivalSecs > 60 && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive()) {
+  // a bit more likely right when they start showing up, settling back to the normal rate over the next 90 seconds
+  const shooterEarlyBoost = 1 + 0.6 * Math.max(0, 1 - (survivalSecs - 60) / 90);
+  if (Math.random() < 0.001 * shooterEarlyBoost) {
     let side = Math.floor(Math.random() * 4);
     let x = 0, y = 0;
 
@@ -8612,7 +8868,7 @@ if (survivalSecs > 85 && !tutorialActive && !isMultiplayerClient && !wavesMode) 
 }
 
 // --- GUGERBIRD (normal mode): appears ~40s after the shooters start, then now and then, one at a time ---
-if (survivalSecs > 125 && !tutorialActive && !isMultiplayerClient && !wavesMode && !bossEnemies.some(b => b.gug)) {
+if (survivalSecs > 125 && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive() && !bossEnemies.some(b => b.gug)) {
   if (Math.random() < 0.0004) {
     let gSide = Math.floor(Math.random() * 4);
     let gx = 0, gy = 0;
@@ -8629,7 +8885,7 @@ if (survivalSecs > 125 && !tutorialActive && !isMultiplayerClient && !wavesMode 
 }
 
 // --- WORM BOSS SPAWN: only spawn after 1 minute with warning ---
-if (survivalMs > WORM_WARN_TIME && !tutorialActive && !isMultiplayerClient && !wavesMode) {
+if (survivalMs > WORM_WARN_TIME && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive()) {
     // chance for a worm to start warning
   if (worms.length === 0 && Math.random() < 0.0005) {
 
@@ -8918,6 +9174,8 @@ for (let i = explosionRings.length - 1; i >= 0; i--) {
 
   if(wavesActive()){
     updateWaves();
+  } else if(playerActive()){
+    playerBotUpdate();
   } else if(!tutorialActive && !isMultiplayerClient && time - lastSpawn > spawnDelay / mpEnemyMult()){
     spawnEnemy();
     lastSpawn = time;
@@ -10497,7 +10755,16 @@ ctx.restore();
     ctx.restore();
     ctx.font="16px sans-serif";
     let names = Object.values(mpPlayers).map(p=>p.username);
-    names.forEach((n,i)=> ctx.fillText(n, canvas.width/2-100, 130+i*24));
+    {
+      const nameTop = 130;
+      const nameLimit = canvas.height - 335 - 30;   // names have to stay above the GAME SETTINGS block
+      const perCol = Math.max(1, Math.floor((nameLimit - nameTop) / 24) + 1);
+      names.forEach((n, i) => {
+        const col = Math.floor(i / perCol);   // when a column is full, start a new one to the right
+        const row = i % perCol;
+        ctx.fillText(n, canvas.width/2 - 100 + col * 200, nameTop + row * 24);
+      });
+    }
     ctx.font="14px sans-serif";
     ctx.fillText(mpIsHost ? "Select Start Game and press Enter" : "Waiting for host to start...", canvas.width/2-100, canvas.height-60);
     if(!mpIsHost) drawMpLobbySettings();
@@ -10568,6 +10835,17 @@ ctx.restore();
       ctx.fillStyle = "yellow";
       ctx.fillText("SPECTATING", canvas.width/2, 24);
       ctx.textAlign = "left";
+      ctx.restore();
+    }
+
+    // being revived right now: "You're coming back" (small yellow text at the bottom, same style as the "has vomited" messages)
+    if (mpDowned && mpPartyCode && performance.now() < mpBeingRevivedUntil) {
+      ctx.save();
+      ctx.font = "16px 'Times New Roman', Times, serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.fillStyle = "yellow";
+      ctx.fillText("You're coming back", canvas.width / 2, canvas.height - 16 - mpDeathMsgs.length * 22);
       ctx.restore();
     }
 
@@ -10753,6 +11031,7 @@ if (previewTurret) {
         ctx.fillText("▬▬ι═══════ﺤ", 15, 5);
         ctx.restore();
     }
+    drawPlayerBot();
     // Remote players (multiplayer ghosts)
     ctx.save();
     ctx.font = "16px sans-serif";
@@ -11013,7 +11292,7 @@ ctx.restore();
         ctx.font = "34px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        if (colorMode) ctx.fillStyle = COLOR_MODE_COLORS.gugerbird;
+        if (colorMode){ ctx.fillStyle = COLOR_MODE_COLORS.gugerbird; ctx.font = "bold 34px sans-serif"; }
         ctx.fillText("𓅃", e.x, e.y);
         ctx.restore();
       } else {
@@ -11446,8 +11725,14 @@ gameOverMusic.play();
   ctx.textAlign = "center";
   // joining players in multiplayer only get "Back to title"; the host (and single player) get both
   const goClientOnly = !!mpPartyCode && !mpIsHost;
-  if (goClientOnly) goSel = 1;
-  const goOptions = goClientOnly ? [["Back to title", 1]] : [["Retry", 0], ["Back to title", 1]];
+  if (goClientOnly) {
+    goSel = 1;
+    // joined players can't retry: tell them to wait for the host
+    ctx.fillStyle = lightMode ? "black" : "white";
+    ctx.fillText("Wait for the host to retry or", canvas.width/2, canvas.height/2 + 25);
+  }
+  const goHostMp = !!mpPartyCode && mpIsHost;
+  const goOptions = goClientOnly ? [["Back to title", 1]] : (goHostMp ? [["Retry", 0], ["Back to party", 2], ["Back to title", 1]] : [["Retry", 0], ["Back to title", 1]]);
   goOptions.forEach(([txt, idx], i) => {
     ctx.fillStyle = (idx === goSel) ? "yellow" : (lightMode ? "black" : "white");
     ctx.fillText(txt, canvas.width/2, canvas.height/2 + 55 + i * 24);
@@ -11700,7 +11985,7 @@ setInterval(()=>{
 }, 3000);
 // ====== CAR SPAWN SYSTEM ======
 setInterval(() => {
-  if (gameState === "playing" && !inCar && !tutorialActive && !isMultiplayerClient && !(wavesMode && boss.active) && Math.random() < 0.54) { // 20% chance
+  if (gameState === "playing" && !inCar && !tutorialActive && !isMultiplayerClient && !(wavesMode && boss.active) && !playerActive() && Math.random() < 0.54) { // 20% chance
     const carSpawnPos = randomPointInPlayableArea(40);
     cars.push({
       id: nextItemId++,
@@ -11713,7 +11998,7 @@ setInterval(() => {
 }, 15000);
 
 setInterval(() => {
-  if (gameState !== "playing" || tutorialActive || isMultiplayerClient || wavesMode) return;
+  if (gameState !== "playing" || tutorialActive || isMultiplayerClient || wavesMode || playerActive()) return;
   // reduce cooldown every tick
   if (treeCooldown > 0) {
     treeCooldown -= 4000;
@@ -12126,6 +12411,8 @@ brodies gay
   console.log("All saved data cleared and reset to defaults.");
 } else if (cmd.toLowerCase() === "/eyeswide") {
     eyesStart();
+} else if (cmd.toLowerCase() === "/playergamemode") {
+    unlockPlayerMode();
 } else if (cmd.toLowerCase() === "/jessmode") {
     jessMode();
 } else if (cmd.toLowerCase() === "/skipwaves") {
@@ -12692,6 +12979,480 @@ setInterval(() => {
   }
 }, 50);
 /* =============== END BOSS MUSIC =============== */
+/* =============== PLAYER MODE (a bot that plays like a real player) =============== */
+function playerActive(){ return playerMode && !tutorialActive && !isMultiplayerClient && !mpPartyCode; }
+
+function unlockPlayerMode(){
+  if(gameModeOptions.indexOf("Player") === -1) gameModeOptions.push("Player");
+  console.log("Player game mode unlocked! It's at the bottom of the game mode list.");
+}
+
+const PB_R = 11;                         // how big the bot's hitbox is
+// guns the bot can use. fire delay comes from the real GUNS table; the rest is how the bot plays each gun
+//   dmg = damage multiplier, cost = ammo per shot, range = distance it likes to fight at,
+//   maxD = furthest it will shoot, spread = extra inaccuracy, auto = hold-to-fire gun
+const PB_GUNS = {
+  pistol:       { dmg: 1,    cost: 1,    range: 210, maxD: 560, spread: 0.03, auto: false },
+  sniper:       { dmg: 2.2,  cost: 1,    range: 340, maxD: 700, spread: 0.01, auto: false, spd: 1.5 },
+  uzi:          { dmg: 0.4,  cost: 0.34, range: 190, maxD: 450, spread: 0.07, auto: true },
+  shotgun:      { dmg: 0.3,  cost: 1,    range: 120, maxD: 260, spread: 0,    auto: false },
+  doublebarrel: { dmg: 0.3,  cost: 1,    range: 110, maxD: 230, spread: 0,    auto: false },
+  machinegun:   { dmg: 0.45, cost: 0.5,  range: 230, maxD: 480, spread: 0.06, auto: true }
+};
+const PB_GUN_KEYS = ["sniper", "uzi", "shotgun", "doublebarrel", "machinegun"];   // what can spawn on the ground
+
+const PB_SCORE = { pistol: 1, uzi: 2, sniper: 2.2, shotgun: 2.3, machinegun: 2.5, doublebarrel: 2.6 };   // how good the bot thinks each gun is
+
+const PB = {
+  alive: false, x: 0, y: 0, vx: 0, vy: 0, hp: 100, maxHp: 100, ammo: 12, gun: "pistol",
+  aim: 0, aimErr: 0, aimErrT: 0, leadK: 0.6, cd: 0, burst: 0, pause: 40,
+  look: "player", lookT: 0, engage: 0, noticeId: -1, noticeT: 0,
+  strafe: 1, strafeT: 30, haltT: 0, keyT: 0, kx: 0, ky: 0, recoilBack: 0, recoilAngle: 0,
+  respawnT: 0, spawnFx: 0, hurtT: 0, ammoT: 0, healthT: 0, gunT: 0,
+  hist: [], pvx: 0, pvy: 0, lastPx: 0, lastPy: 0, stuck: 0, lastX: 0, lastY: 0,
+  dash: false, dashP: 0, dashSx: 0, dashSy: 0, dashTx: 0, dashTy: 0, dashCd: 0, pend: null,
+  youKills: 0
+};
+
+function pbSettings(){
+  if(difficulty === "Easy") return { speed: 1.6, react: 26, err: 0.16, dmg: 12, bspd: 9,  human: [10, 24], burst: [1, 2], pause: [36, 70], dodge: 0.25 };
+  if(difficulty === "Hard") return { speed: 2.0, react: 9,  err: 0.05, dmg: 26, bspd: 14, human: [2, 8],   burst: [2, 4], pause: [12, 30], dodge: 0.75 };
+  return                           { speed: 1.8, react: 16, err: 0.10, dmg: 18, bspd: 12, human: [5, 15],  burst: [1, 3], pause: [22, 48], dodge: 0.5 };
+}
+function pbRand(a, b){ return a + Math.random() * (b - a); }
+function pbCenter(){ const v = playerVisOffset(); return { x: PB.x + v.ox, y: PB.y + v.oy }; }
+
+function pbSpawnSpot(){
+  let best = null, bestD = -1;
+  for(let i = 0; i < 10; i++){
+    const x = 40 + Math.random() * (canvas.width - 80), y = 40 + Math.random() * (canvas.height - 80);
+    const d = player ? Math.hypot(x - player.x, y - player.y) : 0;
+    if(d > bestD){ bestD = d; best = { x, y }; }
+  }
+  return best;
+}
+function pbDrop(arr){
+  const p = { x: 30 + Math.random() * (canvas.width - 60), y: 40 + Math.random() * (canvas.height - 70) };
+  arr.push({ id: nextItemId++, x: p.x, y: p.y });
+}
+function pbDropGun(){
+  const key = PB_GUN_KEYS[Math.floor(Math.random() * PB_GUN_KEYS.length)];
+  let x = 0, y = 0;
+  for(let i = 0; i < 12; i++){
+    x = 40 + Math.random() * (canvas.width - 80); y = 50 + Math.random() * (canvas.height - 90);
+    if(Math.hypot(x - player.x, y - player.y) > 110) break;
+  }
+  gunPickups.push({ id: nextItemId++, x: x, y: y, gunKey: key, glyph: GUNS[key].glyph, bob: 0 });
+}
+function pbSpawn(){
+  const s = pbSpawnSpot();
+  PB.x = s.x; PB.y = s.y; PB.vx = 0; PB.vy = 0;
+  PB.hp = PB.maxHp; PB.ammo = 12; PB.gun = "pistol"; PB.alive = true;
+  PB.cd = 40; PB.burst = 0; PB.pause = 40; PB.spawnFx = 40; PB.hurtT = 0;
+  PB.hist = []; PB.stuck = 0; PB.look = "player"; PB.lookT = 30; PB.engage = 30;
+  PB.dash = false; PB.dashCd = 90; PB.pend = null;
+}
+function playerBotReset(){
+  PB.youKills = 0; PB.respawnT = 0;
+  PB.ammoT = 200; PB.healthT = 420; PB.gunT = 360; PB.recoilBack = 0; PB.recoilAngle = 0;
+  PB.pvx = 0; PB.pvy = 0; PB.lastPx = 0; PB.lastPy = 0;
+  PB.alive = false;
+  if(!playerActive()) return;
+  pbSpawn();
+  pbDrop(pickups); pbDrop(pickups); pbDrop(healthKits);
+}
+
+// is there a wall between a and b?
+function pbBlocked(ax, ay, bx, by){
+  for(const w of walls){
+    for(let t = 0.05; t < 1; t += 0.05){
+      const x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
+      if(Math.abs(x - w.x) < w.w / 2 && Math.abs(y - w.y) < w.h / 2) return true;
+    }
+  }
+  return false;
+}
+function pbNearest(arr, c){
+  let best = null, bd = 1e9;
+  arr.forEach(o => { const d = Math.hypot(o.x - c.x, o.y - c.y); if(d < bd){ bd = d; best = o; } });
+  return best ? { o: best, d: bd } : null;
+}
+
+// the bot's dash: same as yours (120 px, 5 frames, 1 second cooldown) but it stops at walls
+// like you, it has to point its gun the way it wants to dash: it turns first, then dashes when it is facing that way
+function pbStartDash(dx, dy){
+  if(PB.dashCd > 0 || PB.dash || PB.pend) return false;
+  PB.pend = { ang: Math.atan2(dy, dx), t: 40 };
+  return true;
+}
+
+function pbDoDash(dx, dy){
+  if(PB.dashCd > 0 || PB.dash) return false;
+  const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
+  const pv = playerVisOffset();
+  const hits = (px, py) => walls.some(w => Math.abs(px + pv.ox - w.x) < w.w / 2 + pv.hw && Math.abs(py + pv.oy - w.y) < w.h / 2 + pv.hh);
+  let tx = PB.x, ty = PB.y;
+  for(let s = 8; s <= 120; s += 8){
+    const nx = Math.max(12 - pv.ox, Math.min(canvas.width - 12 - pv.ox, PB.x + dx * s));
+    const ny = Math.max(12 - pv.oy, Math.min(canvas.height - 12 - pv.oy, PB.y + dy * s));
+    if(hits(nx, ny)) break;
+    tx = nx; ty = ny;
+  }
+  if(Math.hypot(tx - PB.x, ty - PB.y) < 30) return false;   // nowhere to go
+  PB.dash = true; PB.dashP = 0; PB.dashSx = PB.x; PB.dashSy = PB.y; PB.dashTx = tx; PB.dashTy = ty;
+  PB.dashCd = 80 + Math.random() * 40;
+  PB.vx = 0; PB.vy = 0;
+  for(let i = 0; i < 25; i++){
+    dashParticles.push({ x: PB.x + (Math.random() - 0.5) * 20, y: PB.y + (Math.random() - 0.5) * 20, dx: (Math.random() - 0.5) * 2, dy: (Math.random() - 0.5) * 2, char: ".", life: 20 });
+  }
+  return true;
+}
+
+function pbHurt(d, shotAngle){
+  PB.hp -= d; PB.hurtT = 8;
+  const c = pbCenter();
+  spawnNewBlood(c.x, c.y, shotAngle);
+  for(let i = 0; i < 4; i++) blood.push({ x: c.x, y: c.y, dx: (Math.random() - 0.5) * 2.5, dy: (Math.random() - 0.5) * 2.5, life: 25, maxLife: 25 });
+  PB.look = "player"; PB.lookT = 50; if(PB.engage > 10) PB.engage = 10;   // turns to see who hit it
+  if(PB.hp <= 0) pbDie();
+}
+function pbDie(){
+  const c = pbCenter();
+  PB.alive = false; PB.respawnT = 200; PB.youKills++;
+  kills++; killPop = 1.2; killPopColor = 1.2;
+  for(let i = 0; i < 3; i++) spawnNewBlood(c.x, c.y, Math.random() * Math.PI * 2);
+  mpAddVomit(PB.x, PB.y, null);
+  playSound("https://file.garden/Zfwe_2Ig9weivlFh/emesis3.wav");
+  pickups.push({ id: nextItemId++, x: PB.x, y: PB.y });   // drops some ammo, like a real player
+}
+
+function pbFire(D, c, tc){
+  const key = PB.gun, g = GUNS[key], pg = PB_GUNS[key];
+  PB.ammo -= pg.cost;
+  // same fire delay as you have, plus the little extra a real finger takes between clicks
+  PB.cd = Math.max(1, g.fireRateMs / 16.667) + (pg.auto ? 0 : pbRand(D.human[0], D.human[1]));
+  const pellets = (g.pellets || 1) * (key === "doublebarrel" ? 2 : 1);
+  const baseSp = D.bspd * ((g.bulletSpeed || 20) / 20) * (pg.spd || 1);
+  const dmg = Math.max(1, Math.round(D.dmg * pg.dmg));
+  const spreadR = (g.spreadDeg || 0) * Math.PI / 180;
+  for(let i = 0; i < pellets; i++){
+    const a = PB.aim + (Math.random() - 0.5) * 2 * (pg.spread + spreadR);
+    const sp = pellets > 1 ? baseSp * (0.85 + Math.random() * 0.3) : baseSp;
+    bullets.push({ x: c.x + Math.cos(a) * 14, y: c.y + Math.sin(a) * 14, dx: Math.cos(a) * sp, dy: Math.sin(a) * sp, trail: [],
+                   enemyBullet: true, nid: nextItemId++, glyph: "O", dmg: dmg });
+  }
+  PB.recoilBack = pellets > 1 ? 12 : 4; PB.recoilAngle = (Math.cos(PB.aim) < 0 ? 1 : -1) * (pellets > 1 ? 0.3 : 0.18);
+  const big = pellets > 1 || key === "sniper";
+  muzzleFlashes.push({ x: c.x + Math.cos(PB.aim) * 24, y: c.y + Math.sin(PB.aim) * 24, angle: PB.aim, life: big ? 8 : 5, maxLife: big ? 8 : 5, size: big ? 20 : 12 });
+  const side = Math.random() < 0.5 ? 1 : -1, ea = PB.aim + Math.PI / 2 * side + (Math.random() - 0.5) * 0.6, sp2 = 1 + Math.random() * 1.4;
+  shellCasings.push({ x: PB.x, y: PB.y, dx: Math.cos(ea) * sp2, dy: Math.sin(ea) * sp2 + 0.7, life: 80 + Math.random() * 40,
+                      spin: (Math.random() - 0.5) * 0.4, rot: Math.random() * 6.28, type: pellets > 1 ? "shotgun" : "pistol" });
+  if(Math.hypot(tc.x - c.x, tc.y - c.y) < 700) playSound("https://file.garden/Zfwe_2Ig9weivlFh/shoot.wav");
+}
+
+function playerBotUpdate(){
+  // ---- items appear on the map over time (the only things that spawn in this mode) ----
+  if(--PB.ammoT <= 0){ PB.ammoT = 220 + Math.random() * 160; if(pickups.length < 4) pbDrop(pickups); }
+  if(--PB.healthT <= 0){ PB.healthT = 420 + Math.random() * 240; if(healthKits.length < 2) pbDrop(healthKits); }
+  if(--PB.gunT <= 0){ PB.gunT = 700 + Math.random() * 500; if(gunPickups.length < 2) pbDropGun(); }
+
+  if(PB.spawnFx > 0) PB.spawnFx--;
+  if(PB.hurtT > 0) PB.hurtT--;
+  if(PB.engage > 0) PB.engage--;
+  PB.recoilBack *= 0.82; PB.recoilAngle *= 0.88;
+
+  if(!PB.alive){
+    if(--PB.respawnT <= 0 && player.alive) pbSpawn();
+    return;
+  }
+
+  const D = pbSettings(), pv = playerVisOffset();
+  const c = pbCenter();
+  const tc = { x: playerHitX(), y: playerHitY() };
+  const pg = PB_GUNS[PB.gun];
+
+  // ---- watch the player: remember where they were, work out how fast they move ----
+  PB.hist.push({ x: tc.x, y: tc.y });
+  if(PB.hist.length > 40) PB.hist.shift();
+  PB.pvx += ((tc.x - PB.lastPx) - PB.pvx) * 0.15; PB.pvy += ((tc.y - PB.lastPy) - PB.pvy) * 0.15;
+  PB.lastPx = tc.x; PB.lastPy = tc.y;
+  const seen = PB.hist[Math.max(0, PB.hist.length - 1 - D.react)];   // what it "saw" a moment ago (human reaction time)
+  const pSpeed = Math.hypot(PB.pvx, PB.pvy);
+
+  const dist = Math.hypot(tc.x - c.x, tc.y - c.y);
+  const los = !pbBlocked(c.x, c.y, tc.x, tc.y);
+
+  // is the player pointing their gun at it? (a real player sees that and reacts)
+  let aimedAt = false;
+  if(player.alive){
+    const pa = Math.atan2(mouse.y - player.y, mouse.x - player.x), ta = Math.atan2(c.y - player.y, c.x - player.x);
+    aimedAt = Math.abs(Math.atan2(Math.sin(pa - ta), Math.cos(pa - ta))) < 0.2 && dist < 450;
+  }
+
+  // ---- damage from the player's bullets ----
+  for(let i = bullets.length - 1; i >= 0; i--){
+    const b = bullets[i];
+    if(b.enemyBullet || b.hitPB) continue;
+    const x1 = b.x - b.dx, y1 = b.y - b.dy, sx = b.dx, sy = b.dy, l2 = sx * sx + sy * sy || 1;
+    const t = Math.max(0, Math.min(1, ((c.x - x1) * sx + (c.y - y1) * sy) / l2));
+    if(Math.hypot(c.x - (x1 + sx * t), c.y - (y1 + sy * t)) < PB_R + 3){
+      b.hitPB = true;
+      pbHurt(b.isRocket ? 100 : (b.damage || 10), Math.atan2(b.dy, b.dx));
+      if(!b.isknife && !b.isRailgun) bullets.splice(i, 1);
+      if(!PB.alive) return;
+    }
+  }
+
+  // ---- dash in progress ----
+  if(PB.dashCd > 0) PB.dashCd--;
+  if(PB.dash){
+    const ox = PB.x, oy = PB.y;
+    PB.dashP += 0.2;
+    const cp = Math.min(PB.dashP, 1), e = cp < 0.5 ? 2 * cp * cp : 1 - Math.pow(-2 * cp + 2, 2) / 2;
+    PB.x = PB.dashSx + (PB.dashTx - PB.dashSx) * e;
+    PB.y = PB.dashSy + (PB.dashTy - PB.dashSy) * e;
+    dashLines.push({ x1: ox, y1: oy, x2: PB.x, y2: PB.y, life: 20 });
+    if(PB.dashP >= 1) PB.dash = false;
+  }
+
+  // ---- what does it want right now? (items it can actually see) ----
+  let goal = null;
+  const kit = pbNearest(healthKits, c), amm = pbNearest(pickups, c);
+  let gunGoal = null, gd = 1e9;
+  gunPickups.forEach(gp => {
+    if(!PB_GUNS[gp.gunKey] || PB_SCORE[gp.gunKey] <= PB_SCORE[PB.gun]) return;   // only goes for guns better than its own
+    const d = Math.hypot(gp.x - c.x, gp.y - c.y);
+    if(d < gd && d < 340 && !pbBlocked(c.x, c.y, gp.x, gp.y)){ gd = d; gunGoal = gp; }
+  });
+  if(gunGoal){
+    // takes a moment to notice a new gun before going for it
+    if(PB.noticeId !== gunGoal.id){ PB.noticeId = gunGoal.id; PB.noticeT = 12 + Math.random() * 28; }
+    if(PB.noticeT > 0){ PB.noticeT--; gunGoal = null; }
+  }
+  if(PB.hp < 50 && kit) goal = kit.o;
+  else if(PB.ammo <= 3 && amm) goal = amm.o;
+  else if(gunGoal) goal = gunGoal;
+  else if(kit && kit.d < 110 && PB.hp < 90) goal = kit.o;
+  else if(amm && amm.d < 110 && PB.ammo < 12) goal = amm.o;
+  else if(PB.ammo <= 6 && amm && amm.d < 260) goal = amm.o;
+
+  // ---- hurt or out of ammo: run behind a wall if there is one nearby ----
+  if(!goal && (PB.hp < 35 || PB.ammo < pg.cost) && walls.length && los){
+    let bw = null, bdw = 260;
+    walls.forEach(w => { const d = Math.hypot(w.x - c.x, w.y - c.y); if(d < bdw){ bdw = d; bw = w; } });
+    if(bw){
+      const wx = bw.x - tc.x, wy = bw.y - tc.y, wl = Math.hypot(wx, wy) || 1;
+      goal = { x: bw.x + (wx / wl) * (bw.w / 2 + 26), y: bw.y + (wy / wl) * (bw.h / 2 + 26) };
+    }
+  }
+
+  // ---- where is it looking? not always at you ----
+  PB.lookT--;
+  if(PB.lookT <= 0){
+    PB.lookT = 35 + Math.random() * 90;
+    const prev = PB.look;
+    PB.look = Math.random() < (goal ? 0.3 : 0.8) ? "player" : "move";
+    if(PB.look === "player" && prev !== "player") PB.engage = D.react + Math.random() * 14;   // needs a moment to line up / react
+  }
+  PB.aimErrT--;
+  if(PB.aimErrT <= 0){
+    PB.aimErrT = 10 + Math.random() * 18;
+    let e = (Math.random() - 0.5) * 2 * (D.err * (1 + dist / 250) + pSpeed * 0.05);
+    if(Math.random() < 0.12) e *= 2.2;                  // now and then a bad flick
+    PB.aimErr = e; PB.leadK = 0.3 + Math.random() * 0.6;
+  }
+  let want;
+  if(PB.look === "player"){
+    const lead = (dist / (D.bspd * ((GUNS[PB.gun].bulletSpeed || 20) / 20))) * PB.leadK;
+    want = Math.atan2(seen.y + PB.pvy * lead - c.y, seen.x + PB.pvx * lead - c.x) + PB.aimErr;
+  } else {
+    want = (Math.hypot(PB.vx, PB.vy) > 0.4 ? Math.atan2(PB.vy, PB.vx) : PB.aim) + PB.aimErr * 0.5;
+  }
+  let dA = want - PB.aim; dA = Math.atan2(Math.sin(dA), Math.cos(dA));
+  if(PB.pend){
+    // turning its gun toward the dash direction first (and not shooting meanwhile)
+    let pd = PB.pend.ang - PB.aim; pd = Math.atan2(Math.sin(pd), Math.cos(pd));
+    PB.aim += Math.max(-0.3, Math.min(0.3, pd * 0.35));
+    dA = 1;
+    PB.pend.t--;
+    if(Math.abs(pd) < 0.1){
+      const da = PB.aim; PB.pend = null;
+      pbDoDash(Math.cos(da), Math.sin(da));   // dashes the way the gun is pointing, just like you
+    } else if(PB.pend.t <= 0) PB.pend = null;   // gave up
+  } else {
+    PB.aim += Math.max(-0.12, Math.min(0.12, dA * 0.1));
+  }
+
+  // ---- shooting: only when it is really looking at you, with a clear line, ammo and in range ----
+  if(PB.cd > 0) PB.cd--;
+  const aimTol = PB.gun === "sniper" ? 0.06 : 0.13;
+  if(player.alive && PB.look === "player" && PB.engage <= 0 && PB.ammo >= pg.cost && los && dist < pg.maxD && Math.abs(dA) < aimTol){
+    if(PB.burst > 0){
+      if(PB.cd <= 0){
+        pbFire(D, c, tc); PB.burst--;
+        if(PB.burst <= 0) PB.pause = pbRand(D.pause[0], D.pause[1]);
+      }
+    } else if(--PB.pause <= 0){
+      PB.burst = pg.auto ? Math.floor(pbRand(3, 9)) : Math.floor(pbRand(D.burst[0], D.burst[1] + 1));
+    }
+  }
+
+  // ---- movement wishes ----
+  let mx = 0, my = 0;
+  const ux = (tc.x - c.x) / (dist || 1), uy = (tc.y - c.y) / (dist || 1);
+
+  if(goal){
+    const gx = goal.x - c.x, gy = goal.y - c.y, gl = Math.hypot(gx, gy) || 1;
+    mx = gx / gl; my = gy / gl;
+    mx += -uy * PB.strafe * 0.25; my += ux * PB.strafe * 0.25;
+  } else {
+    // fight: hold the range this gun likes and strafe around the player
+    if(aimedAt && PB.strafeT > 8 && Math.random() < 0.05) PB.strafeT = 0;   // you're aiming at it: change direction sooner
+    PB.strafeT--; if(PB.strafeT <= 0){ PB.strafeT = 25 + Math.random() * 70; if(Math.random() < 0.7) PB.strafe *= -1; if(Math.random() < 0.12) PB.haltT = 12 + Math.random() * 20; }
+    const range = (pg.range + Math.sin(performance.now() / 2500) * 50) * (player.health < 35 && PB.hp > 40 ? 0.6 : 1);   // you're weak: it pushes in
+    let toward = 0;
+    if(dist > range + 60) toward = 1; else if(dist < range - 60) toward = -1;
+    if(PB.hp < 30 || PB.ammo < pg.cost) toward = dist < 330 ? -1.3 : 0;   // low on health or ammo: back off
+    mx = ux * toward + (-uy) * PB.strafe * 0.9;
+    my = uy * toward + ( ux) * PB.strafe * 0.9;
+    if(!los){ mx += ux * 0.8; my += uy * 0.8; }                          // get around the wall to see you
+    if(PB.haltT > 0){ PB.haltT--; mx *= 0.1; my *= 0.1; }
+  }
+
+  // ---- dodge incoming player bullets (not every time, like a real person) ----
+  let boost = 1, dodgeDir = null;
+  for(const b of bullets){
+    if(b.enemyBullet) continue;
+    const bs = Math.hypot(b.dx, b.dy); if(bs < 1) continue;
+    const rx = c.x - b.x, ry = c.y - b.y;
+    const along = (rx * b.dx + ry * b.dy) / bs;
+    if(along <= 0 || along > bs * 26) continue;
+    const perp = (rx * -b.dy + ry * b.dx) / bs;
+    if(Math.abs(perp) > 26) continue;
+    if(b.pbSeen === undefined) b.pbSeen = Math.random() < D.dodge;
+    if(!b.pbSeen) continue;
+    let sgn = perp >= 0 ? 1 : -1;
+    {   // sidestep toward the side that has room (not into a wall or the edge)
+      const tx = c.x + (-b.dy / bs) * sgn * 45, ty = c.y + (b.dx / bs) * sgn * 45;
+      if(tx < 14 || tx > canvas.width - 14 || ty < 14 || ty > canvas.height - 14 || pbBlocked(c.x, c.y, tx, ty)) sgn = -sgn;
+    }
+    mx += (-b.dy / bs) * sgn * 3; my += (b.dx / bs) * sgn * 3; boost = 1.6;
+    if(along < bs * 13 && !dodgeDir) dodgeDir = { x: (-b.dy / bs) * sgn, y: (b.dx / bs) * sgn };
+  }
+
+  if(aimedAt && (mouseDown || player.shootingHeld) && boost < 1.25) boost = 1.25;   // you're aiming and firing: it moves faster
+
+  // ---- dash: dodge a shot, jump back, run, close the gap, sidestep when you aim at it ----
+  if(!PB.dash && PB.dashCd <= 0 && player.alive){
+    const dChance = difficulty === "Hard" ? 0.97 : (difficulty === "Easy" ? 0.5 : 0.8);
+    let dd = null;
+    if(dodgeDir && Math.random() < dChance) dd = dodgeDir;
+    else if(dist < 90 && (PB.hp < 40 || pg.range > 150) && Math.random() < 0.05) dd = { x: -ux, y: -uy };
+    else if(PB.hp < 35 && dist < 220 && Math.random() < 0.04) dd = { x: -ux + (-uy) * PB.strafe * 0.5, y: -uy + ux * PB.strafe * 0.5 };
+    else if(!goal && dist > pg.range + 170 && los && Math.random() < 0.02) dd = { x: ux, y: uy };
+    else if(goal && Math.hypot(goal.x - c.x, goal.y - c.y) > 150 && Math.random() < 0.025) dd = { x: goal.x - c.x, y: goal.y - c.y };
+    else if(!goal && aimedAt && Math.random() < 0.03) dd = { x: -uy * PB.strafe, y: ux * PB.strafe };
+    else if(!goal && los && dist < 400 && Math.random() < 0.004) dd = { x: -uy * PB.strafe, y: ux * PB.strafe };
+    if(dd) pbStartDash(dd.x, dd.y);
+  }
+
+  // ---- keep away from the edges and from touching the player ----
+  const M = 28;
+  if(c.x < M) mx += 1.5;
+  if(c.x > canvas.width - M) mx -= 1.5;
+  if(c.y < M) my += 1.5;
+  if(c.y > canvas.height - M) my -= 1.5;
+  if(dist < 40){ mx -= ux * 2; my -= uy * 2; }
+
+  const ml = Math.hypot(mx, my);
+  // move like a person on a keyboard: 8 directions, held for a random moment, sometimes idle or wrong
+  PB.keyT--;
+  if(boost > 1 || PB.keyT <= 0){
+    PB.keyT = boost > 1 ? 4 : 6 + Math.random() * 28;
+    const wild = boost > 1 ? 0 : (goal ? 0.3 : 1), r = Math.random();   // no random slips while dodging
+    if(ml < 0.15 || r < 0.08 * wild){ PB.kx = 0; PB.ky = 0; }
+    else if(r < 0.22 * wild){ const ra = Math.floor(Math.random() * 8) * Math.PI / 4; PB.kx = Math.round(Math.cos(ra)); PB.ky = Math.round(Math.sin(ra)); }
+    else { const qa = Math.round(Math.atan2(my, mx) / (Math.PI / 4)) * (Math.PI / 4); PB.kx = Math.round(Math.cos(qa)); PB.ky = Math.round(Math.sin(qa)); }
+  }
+  const kl = Math.hypot(PB.kx, PB.ky) || 1;
+  PB.vx += ((PB.kx / kl) * D.speed * boost - PB.vx) * 0.45;
+  PB.vy += ((PB.ky / kl) * D.speed * boost - PB.vy) * 0.45;
+
+  if(PB.dash){ PB.vx = 0; PB.vy = 0; }   // the dash is moving it, not the keys
+
+  // ---- move, sliding along walls the same way you do ----
+  const hitsWall = (w, px, py) => Math.abs(px + pv.ox - w.x) < w.w / 2 + pv.hw && Math.abs(py + pv.oy - w.y) < w.h / 2 + pv.hh;
+  let nx = PB.x + PB.vx, ny = PB.y + PB.vy;
+  for(const w of walls){ if(hitsWall(w, PB.x, PB.y)) continue; if(hitsWall(w, nx, PB.y)){ nx = PB.x; PB.vx = 0; break; } }
+  for(const w of walls){ if(hitsWall(w, nx, PB.y)) continue; if(hitsWall(w, nx, ny)){ ny = PB.y; PB.vy = 0; break; } }
+  nx = Math.max(12 - pv.ox, Math.min(canvas.width - 12 - pv.ox, nx));
+  ny = Math.max(12 - pv.oy, Math.min(canvas.height - 12 - pv.oy, ny));
+  PB.x = nx; PB.y = ny;
+
+  // stuck on something? turn around
+  if(Math.hypot(PB.x - PB.lastX, PB.y - PB.lastY) < 0.4 && ml > 0.5) PB.stuck++; else PB.stuck = 0;
+  PB.lastX = PB.x; PB.lastY = PB.y;
+  if(PB.stuck > 20){ PB.strafe *= -1; PB.stuck = 0; PB.strafeT = 40; }
+
+  // ---- pick up things it walks over ----
+  const c2 = pbCenter();
+  for(let i = pickups.length - 1; i >= 0; i--){
+    if(Math.hypot(c2.x - pickups[i].x, c2.y - pickups[i].y) < 18){ pickups.splice(i, 1); PB.ammo = Math.min(30, PB.ammo + 5); }
+  }
+  for(let i = healthKits.length - 1; i >= 0; i--){
+    if(Math.hypot(c2.x - healthKits[i].x, c2.y - healthKits[i].y) < 18){ healthKits.splice(i, 1); PB.hp = Math.min(PB.maxHp, PB.hp + 25); }
+  }
+  for(let i = gunPickups.length - 1; i >= 0; i--){
+    const gp = gunPickups[i];
+    if(PB_GUNS[gp.gunKey] && PB_SCORE[gp.gunKey] > PB_SCORE[PB.gun] && Math.hypot(c2.x - gp.x, c2.y - gp.y) < 18){
+      gunPickups.splice(i, 1);
+      PB.gun = gp.gunKey; PB.ammo = Math.min(30, PB.ammo + 4);
+      PB.cd = 25; PB.burst = 0; PB.pause = 25;      // takes a moment to switch
+    }
+  }
+}
+
+function drawPlayerBot(){
+  if(!playerActive() || gameState !== "playing" || !PB.alive) return;
+  const v = playerVisOffset();
+  ctx.save();
+  ctx.font = "16px sans-serif";
+  const col = lightMode ? "black" : "white";
+
+  // spawn-in ring
+  if(PB.spawnFx > 0){
+    ctx.save();
+    ctx.globalAlpha = PB.spawnFx / 40;
+    ctx.strokeStyle = col; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(PB.x + v.ox, PB.y + v.oy, 40 - PB.spawnFx, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  // body (no glow)
+  ctx.save();
+  ctx.globalAlpha = PB.spawnFx > 0 ? 0.4 + 0.6 * (1 - PB.spawnFx / 40) : 0.9;
+  ctx.fillStyle = col;
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.fillText("ᗢ", PB.x, PB.y);
+  ctx.restore();
+
+  // gun, pointed where it is aiming, with recoil
+  const gun = GUNS[PB.gun] || GUNS.pistol;
+  ctx.save();
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = col;
+  ctx.translate(PB.x, PB.y);
+  ctx.translate(-Math.cos(PB.aim) * PB.recoilBack, -Math.sin(PB.aim) * PB.recoilBack);
+  ctx.rotate(PB.aim + PB.recoilAngle);
+  if(Math.cos(PB.aim) < 0) ctx.scale(1, -1);
+  if(gun.image) ctx.drawImage(gun.image, 15, 5, 24, 24);
+  else ctx.fillText(gun.originalGlyph || gun.glyph, 15, 5);
+  ctx.restore();
+
+  ctx.restore();
+}
+/* =============== END PLAYER MODE =============== */
+/* =============== END PLAYER MODE =============== */
 
 /* =============== JESS MODE =============== */
 function jessMode_old_unused(){
