@@ -4,12 +4,13 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 
   <title>emesis</title>
   <link rel="icon" type="image/png" href="https://file.garden/Zfwe_2Ig9weivlFh/emesis%20logo.png">
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <style>
-    body { margin:0; overflow:hidden; background:#000; }
+    html, body { margin:0; overflow:hidden; background:#000; width:100%; height:100%; overscroll-behavior:none; touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
     canvas { background:#111; display:block; margin:0 auto; }
     #game { position:relative; z-index:1; }
     #game.bossLayer { background:transparent; }
@@ -13964,5 +13965,450 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
 /* =============== END /eyeswide EVENT =============== */
 </script>
 
+<!-- ===================== EMESIS MOBILE CONTROLS (START) ===================== -->
+<style>
+  #mobUI, #mobUI * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
+  #mobUI {
+    --mc: #fff; --mbg: rgba(0,0,0,0.38); --mhi: #ff0; --mfire: #f33;
+    position:fixed; left:0; top:0; width:100%; height:100%;
+    z-index:50; pointer-events:none; display:none;
+    font-family: Arial, sans-serif; color:var(--mc);
+  }
+  #mobUI .mzone { position:absolute; bottom:0; width:42%; height:72%; pointer-events:auto; }
+  #mobUI #mzoneL { left:0; }
+  #mobUI #mzoneR { right:0; }
+  #mobUI .mbase {
+    position:absolute; width:min(30vmin,140px); height:min(30vmin,140px); border-radius:50%;
+    border:2px solid var(--mc); background:var(--mbg); opacity:0.4; pointer-events:none;
+    transform:translate(-50%,-50%);
+  }
+  #mobUI .mbase.on { opacity:0.85; }
+  #mobUI .mknob {
+    position:absolute; left:50%; top:50%; width:42%; height:42%; border-radius:50%;
+    border:2px solid var(--mc); background:rgba(255,255,255,0.14);
+    transform:translate(-50%,-50%); pointer-events:none;
+  }
+  #mobUI #mbaseR.fire { border-color:var(--mfire); }
+  #mobUI #mbaseR.fire .mknob { border-color:var(--mfire); background:rgba(255,40,40,0.28); }
+  #mobUI .mbtn {
+    position:absolute; pointer-events:auto; display:none;
+    width:min(15vmin,66px); height:min(15vmin,66px); border-radius:50%;
+    border:2px solid var(--mc); background:var(--mbg); color:var(--mc);
+    font-size:min(3.4vmin,15px); font-weight:bold; letter-spacing:1px;
+    align-items:center; justify-content:center; text-align:center; line-height:1.05;
+  }
+  #mobUI .mbtn.sq { border-radius:10px; }
+  #mobUI .mbtn.small { width:min(11vmin,48px); height:min(11vmin,48px); font-size:min(3vmin,13px); }
+  #mobUI .mbtn.down { background:rgba(255,255,0,0.28); border-color:var(--mhi); color:var(--mhi); }
+  #mobUI .mbtn.show { display:flex; }
+  #mobUI .mbtn.wide { width:min(22vmin,100px); border-radius:12px; }
+  #mobRotate {
+    position:fixed; left:0; top:0; width:100%; height:100%; z-index:60; display:none;
+    background:#000; color:#fff; font-family:Arial,sans-serif; text-align:center;
+    align-items:center; justify-content:center; flex-direction:column; font-size:20px; letter-spacing:2px;
+  }
+  #mobRotate div.big { font-size:54px; margin-bottom:14px; }
+  #mobKbd { position:fixed; left:0; bottom:0; width:1px; height:1px; opacity:0.01; border:0; padding:0; z-index:49; font-size:16px; }
+</style>
+
+<div id="mobUI">
+  <div class="mzone" id="mzoneL"></div>
+  <div class="mzone" id="mzoneR"></div>
+  <div class="mbase" id="mbaseL"><div class="mknob" id="mknobL"></div></div>
+  <div class="mbase" id="mbaseR"><div class="mknob" id="mknobR"></div></div>
+</div>
+<div id="mobRotate"><div class="big">&#8635;</div><div>ROTATE YOUR DEVICE</div><div style="font-size:13px;margin-top:10px;opacity:0.7;">EMESIS is played sideways</div></div>
+<input id="mobKbd" type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
+
+<script>
+/* ===== EMESIS MOBILE CONTROLS =====
+   Shows touch controls on phones / tablets only. Nothing changes on a computer.
+   LEFT stick = move.  RIGHT stick = aim (push it all the way out to fire).
+   Add ?mobile=1 to the end of the page URL to test it on a computer. */
+(function(){
+  "use strict";
+
+  var FORCE = /[?&]mobile=1/.test(location.search);
+  var UA_MOBILE = /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent);
+  var COARSE = !!(window.matchMedia && matchMedia("(pointer: coarse)").matches && navigator.maxTouchPoints > 0);
+
+  var MENU_STATES = ["title","modeselect","gamesettings","options","credits","mpusername","mpchoice","mpjoincode","mplobby","mppublic","gameover","paused"];
+  var TEXT_STATES = ["mpusername","mpjoincode","mplobby","mppublic"];
+  var CLICK_SND = "https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav";
+
+  var root = document.getElementById("mobUI");
+  var rotateBox = document.getElementById("mobRotate");
+  var kbd = document.getElementById("mobKbd");
+  var enabled = false;
+
+  // ---------- tiny helpers ----------
+  function state(){ try { return gameState; } catch(e){ return undefined; } }
+  function pl(){ try { return player; } catch(e){ return undefined; } }
+
+  function sendKey(type, key, code){
+    var ev = new KeyboardEvent(type, { key: key, code: code || "", bubbles: true, cancelable: true });
+    document.dispatchEvent(ev);
+  }
+  function tapKey(key, code, holdMs){
+    sendKey("keydown", key, code);
+    setTimeout(function(){ sendKey("keyup", key, code); }, holdMs || 40);
+  }
+  function setHeld(key, on){
+    // movement keys are read straight from the game's "keys" table
+    try { keys[key] = on; } catch(e){}
+  }
+
+  // ---------- build buttons ----------
+  var buttons = {};
+  function makeBtn(id, label, cls, css, onDown, onUp){
+    var b = document.createElement("div");
+    b.className = "mbtn " + (cls || "");
+    b.id = "mb_" + id;
+    b.innerHTML = label;
+    for(var k in css) b.style[k] = css[k];
+    var tid = null;
+    b.addEventListener("touchstart", function(e){
+      e.preventDefault();
+      if(tid !== null) return;
+      tid = e.changedTouches[0].identifier;
+      b.classList.add("down");
+      onDown && onDown();
+    }, { passive:false });
+    function end(e){
+      for(var i = 0; i < e.changedTouches.length; i++){
+        if(e.changedTouches[i].identifier === tid){
+          tid = null; b.classList.remove("down");
+          onUp && onUp();
+        }
+      }
+    }
+    b.addEventListener("touchend", end, { passive:false });
+    b.addEventListener("touchcancel", end, { passive:false });
+    root.appendChild(b);
+    buttons[id] = b;
+    return b;
+  }
+
+  var SAFE_R = "calc(env(safe-area-inset-right, 0px) + ";
+  var SAFE_L = "calc(env(safe-area-inset-left, 0px) + ";
+
+  // --- in-game buttons (right side, above the aim stick) ---
+  makeBtn("dash", "DASH", "", { right: SAFE_R + "3vmin)", bottom: "44vmin" }, function(){ doDash(); });
+  makeBtn("swap", "SWAP", "", { right: SAFE_R + "20vmin)", bottom: "44vmin" }, function(){ cycleGun(); });
+  makeBtn("mode", "WALL<br>TURRET", "small", { right: SAFE_R + "37vmin)", bottom: "44vmin" }, function(){ toggleHammer(); });
+  // --- in-game buttons (left side, above the move stick) ---
+  makeBtn("brk", "BREAK", "small", { left: SAFE_L + "3vmin)", bottom: "44vmin" }, function(){ tapKey("q","KeyQ"); });
+  makeBtn("drop", "DROP", "small", { left: SAFE_L + "16vmin)", bottom: "44vmin" }, function(){ tapKey("g","KeyG"); });
+  makeBtn("rev", "R", "small", { left: SAFE_L + "29vmin)", bottom: "44vmin" }, function(){ sendKey("keydown","r","KeyR"); }, function(){ sendKey("keyup","r","KeyR"); });
+  // --- spectate (when dead in multiplayer) ---
+  makeBtn("specL", "&#9664;", "small", { left: "calc(50% - 60px)", bottom: "6vmin" }, function(){ tapKey("ArrowLeft","ArrowLeft"); });
+  makeBtn("specR", "&#9654;", "small", { left: "calc(50% + 12px)", bottom: "6vmin" }, function(){ tapKey("ArrowRight","ArrowRight"); });
+  // --- pause (top middle) ---
+  makeBtn("pause", "II", "small sq", { left: "calc(50% - 24px)", top: "calc(env(safe-area-inset-top, 0px) + 6px)" }, function(){ tapKey("Escape","Escape"); });
+
+  // --- menu pad (D-pad bottom right, OK / BACK bottom left) ---
+  var DP = "min(13vmin,58px)";
+  function dpad(id, label, key, rightExpr, bottomExpr){
+    return makeBtn(id, label, "sq", { right: SAFE_R + rightExpr + ")", bottom: bottomExpr, width: DP, height: DP },
+      function(){ tapKey(key, key); });
+  }
+  dpad("mUp", "&#9650;", "ArrowUp", "calc(" + DP + " + 6vmin)", "calc(" + DP + " * 2 + 8vmin)");
+  dpad("mDn", "&#9660;", "ArrowDown", "calc(" + DP + " + 6vmin)", "4vmin");
+  dpad("mLf", "&#9664;", "ArrowLeft", "calc(" + DP + " * 2 + 8vmin)", "calc(" + DP + " + 6vmin)");
+  dpad("mRt", "&#9654;", "ArrowRight", "4vmin", "calc(" + DP + " + 6vmin)");
+  makeBtn("mOk", "OK", "wide", { left: SAFE_L + "6vmin)", bottom: "calc(" + DP + " + 6vmin)" }, function(){ tapKey("Enter","Enter"); });
+  makeBtn("mBack", "BACK", "wide", { left: SAFE_L + "6vmin)", bottom: "4vmin" }, function(){ tapKey("Escape","Escape"); });
+  makeClickBtn("mKbd", "KEYBOARD", "wide", { left: "calc(50% - min(11vmin,50px))", bottom: "4vmin" }, function(){ openKeyboard(); });
+  makeClickBtn("mFull", "FULL<br>SCREEN", "small sq", { right: SAFE_R + "3vmin)", top: "calc(env(safe-area-inset-top, 0px) + 6px)" }, function(){ goFullscreen(); });
+
+  function makeClickBtn(id, label, cls, css, onClick){
+    var b = document.createElement("div");
+    b.className = "mbtn " + (cls || "");
+    b.id = "mb_" + id;
+    b.innerHTML = label;
+    for(var k in css) b.style[k] = css[k];
+    b.addEventListener("click", function(e){ e.preventDefault(); onClick && onClick(); });
+    root.appendChild(b);
+    buttons[id] = b;
+    return b;
+  }
+
+  // ---------- actions ----------
+  var moveActive = false, aimActive = false, aimAng = 0, aimMag = 0, moveDx = 0, moveDy = 0, firing = false, lastAimAng = null;
+
+  function setAimPoint(ang){
+    var p = pl();
+    if(!p) return;
+    var cam = { x:0, y:0, zoom:1 };
+    try { cam = getCameraState(); } catch(e){}
+    var sx = p.x * cam.zoom + cam.x + Math.cos(ang) * 170;
+    var sy = p.y * cam.zoom + cam.y + Math.sin(ang) * 170;
+    try {
+      lastRawMouseScreenX = sx; lastRawMouseScreenY = sy;
+      var w = screenToWorld(sx, sy);
+      mouse.x = w.x; mouse.y = w.y;
+    } catch(e){}
+  }
+
+  function doDash(){
+    var p = pl();
+    if(state() !== "playing" || !p || !p.alive) return;
+    // dash goes where you aim; if you are not aiming but are moving, dash the way you are moving
+    if(!aimActive && moveActive) setAimPoint(Math.atan2(moveDy, moveDx));
+    sendKey("keydown", "Shift", "ShiftLeft");
+    setTimeout(function(){ sendKey("keyup", "Shift", "ShiftLeft"); }, 140);
+  }
+
+  function cycleGun(){
+    var p = pl();
+    if(state() !== "playing" || !p || !p.alive) return;
+    try {
+      var slots = [];
+      for(var i = 0; i < MAX_INVENTORY_SLOTS; i++){ var gk = gunAtSlot(i); if(gk) slots.push(gk); }
+      if(slots.length < 2) return;
+      var at = slots.indexOf(p.currentGunKey);
+      setCurrentGun(slots[(at + 1) % slots.length]);
+      playSound(CLICK_SND);
+    } catch(e){}
+  }
+
+  function toggleHammer(){
+    var p = pl();
+    if(state() !== "playing" || !p || p.currentGunKey !== "hammer") return;
+    try {
+      hammerBuildMode = (hammerBuildMode === "wall") ? "turret" : "wall";
+      p.shootingHeld = false;
+      playSound(CLICK_SND);
+    } catch(e){}
+  }
+
+  function goFullscreen(){
+    var el = document.documentElement;
+    var req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if(req){
+      try {
+        var r = req.call(el);
+        var lock = function(){ try { screen.orientation.lock("landscape").catch(function(){}); } catch(e){} };
+        if(r && r.then) r.then(lock).catch(function(){}); else lock();
+      } catch(e){}
+    }
+  }
+
+  // ---------- on-screen keyboard for the typing screens ----------
+  var kbdPrev = "";
+  var FILL = "\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b";
+  function openKeyboard(){
+    kbd.value = FILL; kbdPrev = kbd.value;
+    kbd.focus();
+    try { kbd.setSelectionRange(kbd.value.length, kbd.value.length); } catch(e){}
+  }
+  function closeKeyboard(){ kbd.blur(); kbd.value = ""; kbdPrev = ""; }
+  kbd.addEventListener("input", function(){
+    var v = kbd.value, p = 0;
+    while(p < v.length && p < kbdPrev.length && v[p] === kbdPrev[p]) p++;
+    var removed = kbdPrev.length - p;
+    for(var i = 0; i < removed; i++){ tapKey("Backspace","Backspace",5); }
+    var added = v.slice(p);
+    for(var j = 0; j < added.length; j++){
+      var ch = added[j];
+      if(ch === "\u200b") continue;
+      tapKey(ch, "", 5);
+    }
+    kbdPrev = v;
+    if(v.length < 4) { kbd.value = FILL; kbdPrev = kbd.value; }
+  });
+  kbd.addEventListener("keydown", function(e){
+    e.stopPropagation();
+    if(e.key === "Enter"){ e.preventDefault(); tapKey("Enter","Enter"); closeKeyboard(); }
+  });
+  kbd.addEventListener("keyup", function(e){ e.stopPropagation(); });
+  kbd.addEventListener("keypress", function(e){ e.stopPropagation(); });
+
+  // ---------- floating sticks ----------
+  var baseL = document.getElementById("mbaseL"), knobL = document.getElementById("mknobL");
+  var baseR = document.getElementById("mbaseR"), knobR = document.getElementById("mknobR");
+  var zoneL = document.getElementById("mzoneL"), zoneR = document.getElementById("mzoneR");
+  var stickL = { id:null, cx:0, cy:0 }, stickR = { id:null, cx:0, cy:0 };
+
+  function placeDefault(){
+    var vmin = Math.min(window.innerWidth, window.innerHeight) / 100;
+    var r = Math.min(30 * vmin, 140) / 2;
+    var pad = Math.max(r + 14, 11 * vmin);
+    baseL.style.left = pad + "px";  baseL.style.top = (window.innerHeight - pad) + "px";
+    baseR.style.left = (window.innerWidth - pad) + "px"; baseR.style.top = (window.innerHeight - pad) + "px";
+    knobL.style.transform = knobR.style.transform = "translate(-50%,-50%)";
+  }
+
+  function stickStart(st, base, knob, e){
+    if(st.id !== null) return;
+    var t = e.changedTouches[0];
+    st.id = t.identifier; st.cx = t.clientX; st.cy = t.clientY;
+    base.style.left = st.cx + "px"; base.style.top = st.cy + "px";
+    base.classList.add("on");
+  }
+  function stickVec(st, base, t){
+    var r = base.offsetWidth / 2;
+    var dx = t.clientX - st.cx, dy = t.clientY - st.cy;
+    var d = Math.hypot(dx, dy);
+    var m = Math.min(1, d / r);
+    var ang = Math.atan2(dy, dx);
+    return { dx: Math.cos(ang) * m, dy: Math.sin(ang) * m, mag: m, ang: ang, r: r };
+  }
+  function moveKnob(knob, v){
+    knob.style.transform = "translate(calc(-50% + " + (v.dx * v.r) + "px), calc(-50% + " + (v.dy * v.r) + "px))";
+  }
+
+  zoneL.addEventListener("touchstart", function(e){ e.preventDefault(); stickStart(stickL, baseL, knobL, e); }, { passive:false });
+  zoneR.addEventListener("touchstart", function(e){ e.preventDefault(); stickStart(stickR, baseR, knobR, e); }, { passive:false });
+
+  function onMove(e){
+    var used = false;
+    for(var i = 0; i < e.changedTouches.length; i++){
+      var t = e.changedTouches[i];
+      if(t.identifier === stickL.id){
+        var v = stickVec(stickL, baseL, t);
+        moveKnob(knobL, v);
+        moveDx = v.dx; moveDy = v.dy; moveActive = v.mag > 0.2;
+        applyMoveKeys(v);
+        used = true;
+      } else if(t.identifier === stickR.id){
+        var w = stickVec(stickR, baseR, t);
+        moveKnob(knobR, w);
+        aimAng = w.ang; aimMag = w.mag; aimActive = w.mag > 0.15;
+        used = true;
+      }
+    }
+    if(used) e.preventDefault();
+  }
+  function onEnd(e){
+    for(var i = 0; i < e.changedTouches.length; i++){
+      var t = e.changedTouches[i];
+      if(t.identifier === stickL.id){
+        stickL.id = null; baseL.classList.remove("on");
+        moveActive = false; moveDx = moveDy = 0; applyMoveKeys({ dx:0, dy:0 });
+        placeDefault();
+      } else if(t.identifier === stickR.id){
+        stickR.id = null; baseR.classList.remove("on");
+        aimActive = false; aimMag = 0; setFire(false); lastAimAng = null;
+        try { mouseMoving = false; } catch(e2){}
+        placeDefault();
+      }
+    }
+  }
+  window.addEventListener("touchmove", onMove, { passive:false });
+  window.addEventListener("touchend", onEnd, { passive:false });
+  window.addEventListener("touchcancel", onEnd, { passive:false });
+
+  var held = { w:false, a:false, s:false, d:false };
+  function applyMoveKeys(v){
+    var want = { w: v.dy < -0.38, s: v.dy > 0.38, a: v.dx < -0.38, d: v.dx > 0.38 };
+    for(var k in want){
+      if(want[k] !== held[k]){ held[k] = want[k]; setHeld(k, want[k]); }
+    }
+  }
+  function releaseAll(){
+    applyMoveKeys({ dx:0, dy:0 });
+    setFire(false);
+  }
+
+  function setFire(on){
+    if(on === firing) return;
+    firing = on;
+    baseR.classList.toggle("fire", on);
+    sendKey(on ? "keydown" : "keyup", "e", "KeyE");
+  }
+
+  // ---------- tap the inventory slots on the canvas ----------
+  var rc = document.getElementById("game");
+  rc.addEventListener("touchstart", function(e){
+    if(!enabled || state() !== "playing") return;
+    e.preventDefault();
+    try { for(var i = 0; i < e.changedTouches.length; i++) handleInventoryClick(e.changedTouches[i]); } catch(err){}
+  }, { passive:false });
+
+  // ---------- main loop: aiming, firing, and showing the right buttons ----------
+  var lastShown = "";
+  function tick(){
+    requestAnimationFrame(tick);
+    if(!enabled) return;
+    var st = state(), p = pl();
+    var menuOpenInGame = false;
+    try { menuOpenInGame = (st === "playing" && mpClientMenuOpen); } catch(e){}
+    var inGame = (st === "playing") && !menuOpenInGame;
+    var inMenu = MENU_STATES.indexOf(st) !== -1 || menuOpenInGame;
+
+    if(inGame && p && p.alive){
+      if(aimActive){
+        setAimPoint(aimAng);
+        var turned = (lastAimAng === null) ? 0 : Math.abs(Math.atan2(Math.sin(aimAng - lastAimAng), Math.cos(aimAng - lastAimAng)));
+        lastAimAng = aimAng;
+        var wantFire = aimMag > 0.5;
+        setFire(wantFire);
+        // sword: it only hurts while the mouse is "moving", so count a held aim stick as swinging
+        try { mouseMoving = wantFire || turned > 0.03; window.mouseSpeed = mouseMoving ? 1 : 0; } catch(e){}
+      }
+    } else {
+      releaseAll();
+    }
+
+    // which buttons to show
+    var mp = false, isHammer = false, dead = false;
+    try { mp = !!mpPartyCode; } catch(e){}
+    if(p){ isHammer = (p.currentGunKey === "hammer"); dead = !p.alive; }
+    var key = [inGame, inMenu, st, mp, isHammer, dead, TEXT_STATES.indexOf(st) !== -1].join("|");
+    if(key !== lastShown){
+      lastShown = key;
+      var showBtn = function(id, on){ buttons[id].classList.toggle("show", !!on); };
+      var alive = inGame && !dead;
+      showBtn("dash", alive); showBtn("swap", alive); showBtn("brk", alive); showBtn("drop", alive);
+      showBtn("mode", alive && isHammer);
+      showBtn("rev", alive && mp);
+      showBtn("specL", inGame && dead && mp); showBtn("specR", inGame && dead && mp);
+      showBtn("pause", inGame && st === "playing" && !menuOpenInGame);
+      ["mUp","mDn","mLf","mRt","mOk","mBack"].forEach(function(id){ showBtn(id, inMenu); });
+      showBtn("mKbd", inMenu && TEXT_STATES.indexOf(st) !== -1);
+      showBtn("mFull", inMenu && !!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen) && !document.fullscreenElement && st === "title");
+      zoneL.style.display = zoneR.style.display = inGame ? "block" : "none";
+      baseL.style.display = baseR.style.display = inGame ? "block" : "none";
+      if(TEXT_STATES.indexOf(st) === -1) closeKeyboard();
+    }
+  }
+
+  // ---------- light mode support (the game has an inverted look) ----------
+  setInterval(function(){
+    var light = false;
+    try { light = !!lightMode; } catch(e){}
+    root.style.setProperty("--mc", light ? "#000" : "#fff");
+    root.style.setProperty("--mbg", light ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.38)");
+    root.style.setProperty("--mhi", light ? "#c00" : "#ff0");
+  }, 600);
+
+  // ---------- turn everything on ----------
+  function updateRotate(){
+    if(!enabled) { rotateBox.style.display = "none"; return; }
+    rotateBox.style.display = (window.innerHeight > window.innerWidth) ? "flex" : "none";
+  }
+  function enable(){
+    if(enabled) return;
+    enabled = true;
+    if(typeof window.mouseSpeed === "undefined") window.mouseSpeed = 0;   // the sword code reads this; a touch screen never creates it
+    root.style.display = "block";
+    placeDefault();
+    updateRotate();
+  }
+  window.addEventListener("resize", function(){ placeDefault(); updateRotate(); });
+  window.addEventListener("orientationchange", function(){ setTimeout(function(){ placeDefault(); updateRotate(); }, 250); });
+
+  // stop the page from scrolling / zooming while playing on touch
+  document.addEventListener("touchmove", function(e){ if(enabled && e.target !== kbd) e.preventDefault(); }, { passive:false });
+  document.addEventListener("gesturestart", function(e){ if(enabled) e.preventDefault(); });
+
+  if(FORCE || UA_MOBILE || COARSE) enable();
+  else window.addEventListener("touchstart", enable, { once:true, passive:true });   // touch laptops / odd tablets
+
+  requestAnimationFrame(tick);
+})();
+</script>
+<!-- ===================== EMESIS MOBILE CONTROLS (END) ===================== -->
 </body>
 </html>
