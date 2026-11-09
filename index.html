@@ -7480,6 +7480,7 @@ if (!player.dashing && player.alive) {
   if (keys["s"]) dy += player.speed;
   if (keys["a"]) dx -= player.speed;
   if (keys["d"]) dx += player.speed;
+  if (window.mobMove && window.mobMove.on) { dx = window.mobMove.x * player.speed; dy = window.mobMove.y * player.speed; }   // mobile stick: smooth, any direction
 
   const pv = playerVisOffset();
   // does the player's visible body (a small box) overlap this wall's box at this spot?
@@ -13964,7 +13965,6 @@ const __eyesSpawnTree = spawnTree;
 spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply(this, arguments); };
 /* =============== END /eyeswide EVENT =============== */
 </script>
-
 <!-- ===================== EMESIS MOBILE CONTROLS (START) ===================== -->
 <style>
   #mobUI, #mobUI * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
@@ -13979,14 +13979,14 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
   #mobUI #mzoneR { right:0; }
   #mobUI .mbase {
     position:absolute; width:min(30vmin,140px); height:min(30vmin,140px); border-radius:50%;
-    border:2px solid var(--mc); background:var(--mbg); opacity:0.4; pointer-events:none;
-    transform:translate(-50%,-50%);
+    left:0; top:0; border:2px solid var(--mc); background:var(--mbg); opacity:0.4; pointer-events:none;
+    will-change:transform;
   }
   #mobUI .mbase.on { opacity:0.85; }
   #mobUI .mknob {
-    position:absolute; left:50%; top:50%; width:42%; height:42%; border-radius:50%;
+    position:absolute; left:29%; top:29%; width:42%; height:42%; border-radius:50%;
     border:2px solid var(--mc); background:rgba(255,255,255,0.14);
-    transform:translate(-50%,-50%); pointer-events:none;
+    pointer-events:none; will-change:transform;
   }
   #mobUI #mbaseR.fire { border-color:var(--mfire); }
   #mobUI #mbaseR.fire .mknob { border-color:var(--mfire); background:rgba(255,40,40,0.28); }
@@ -14023,7 +14023,7 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
 <script>
 /* ===== EMESIS MOBILE CONTROLS =====
    Shows touch controls on phones / tablets only. Nothing changes on a computer.
-   LEFT stick = move.  RIGHT stick = aim (push it all the way out to fire).
+   LEFT stick = move (smooth, any direction).  RIGHT stick = aim (push it about half way out to fire).
    Add ?mobile=1 to the end of the page URL to test it on a computer. */
 (function(){
   "use strict";
@@ -14034,6 +14034,14 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
 
   var MENU_STATES = ["title","modeselect","gamesettings","options","credits","mpusername","mpchoice","mpjoincode","mplobby","mppublic","gameover","paused"];
   var TEXT_STATES = ["mpusername","mpjoincode","mplobby","mppublic"];
+  // ---- tuning (change these if you want) ----
+  var MOVE_DEADZONE = 0.12;      // how far you must push before you move (0 to 1)
+  var MOVE_FULL_AT  = 0.9;       // how far the stick must go to run at full speed (0 to 1)
+  var ASSIST_ON     = true;      // little bit of aim assist on the aim stick
+  var ASSIST_CONE   = 0.45;      // how far off target (radians, 0.45 = about 26 degrees) it can still help
+  var ASSIST_RANGE  = 520;       // how far away an enemy can be for the assist
+  var ASSIST_PULL   = 0.6;       // how strongly it pulls toward the enemy (0 = off, 1 = full lock)
+  var MOBILE_RES_INDEX = 1;      // default quality on mobile: 0 Low, 1 Medium, 2 Standard (only used until you pick one in Options)
   var CLICK_SND = "https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav";
 
   var root = document.getElementById("mobUI");
@@ -14053,10 +14061,8 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
     sendKey("keydown", key, code);
     setTimeout(function(){ sendKey("keyup", key, code); }, holdMs || 40);
   }
-  function setHeld(key, on){
-    // movement keys are read straight from the game's "keys" table
-    try { keys[key] = on; } catch(e){}
-  }
+  // smooth (any direction) movement: the game reads this every frame (see the movement edit)
+  window.mobMove = { on:false, x:0, y:0 };
 
   // ---------- build buttons ----------
   var buttons = {};
@@ -14098,8 +14104,7 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
   makeBtn("mode", "WALL<br>TURRET", "small", { right: SAFE_R + "37vmin)", bottom: "44vmin" }, function(){ toggleHammer(); });
   // --- in-game buttons (left side, above the move stick) ---
   makeBtn("brk", "BREAK", "small", { left: SAFE_L + "3vmin)", bottom: "44vmin" }, function(){ tapKey("q","KeyQ"); });
-  makeBtn("drop", "DROP", "small", { left: SAFE_L + "16vmin)", bottom: "44vmin" }, function(){ tapKey("g","KeyG"); });
-  makeBtn("rev", "R", "small", { left: SAFE_L + "29vmin)", bottom: "44vmin" }, function(){ sendKey("keydown","r","KeyR"); }, function(){ sendKey("keyup","r","KeyR"); });
+  makeBtn("rev", "R", "small", { left: SAFE_L + "16vmin)", bottom: "44vmin" }, function(){ sendKey("keydown","r","KeyR"); }, function(){ sendKey("keyup","r","KeyR"); });
   // --- spectate (when dead in multiplayer) ---
   makeBtn("specL", "&#9664;", "small", { left: "calc(50% - 60px)", bottom: "6vmin" }, function(){ tapKey("ArrowLeft","ArrowLeft"); });
   makeBtn("specR", "&#9654;", "small", { left: "calc(50% + 12px)", bottom: "6vmin" }, function(){ tapKey("ArrowRight","ArrowRight"); });
@@ -14228,55 +14233,52 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
   var baseL = document.getElementById("mbaseL"), knobL = document.getElementById("mknobL");
   var baseR = document.getElementById("mbaseR"), knobR = document.getElementById("mknobR");
   var zoneL = document.getElementById("mzoneL"), zoneR = document.getElementById("mzoneR");
-  var stickL = { id:null, cx:0, cy:0 }, stickR = { id:null, cx:0, cy:0 };
+  var stickL = { id:null, cx:0, cy:0, tx:0, ty:0, kx:null, ky:null };
+  var stickR = { id:null, cx:0, cy:0, tx:0, ty:0, kx:null, ky:null };
+  var baseHalf = 60;
+
+  function putBase(base, x, y){ base.style.transform = "translate3d(" + (x - baseHalf) + "px," + (y - baseHalf) + "px,0)"; }
+  function putKnob(knob, st, x, y){
+    x = Math.round(x * 2) / 2; y = Math.round(y * 2) / 2;
+    if(st.kx === x && st.ky === y) return;      // nothing changed, skip the DOM write
+    st.kx = x; st.ky = y;
+    knob.style.transform = "translate3d(" + x + "px," + y + "px,0)";
+  }
 
   function placeDefault(){
+    baseHalf = (baseL.offsetWidth / 2) || 60;
     var vmin = Math.min(window.innerWidth, window.innerHeight) / 100;
-    var r = Math.min(30 * vmin, 140) / 2;
-    var pad = Math.max(r + 14, 11 * vmin);
-    baseL.style.left = pad + "px";  baseL.style.top = (window.innerHeight - pad) + "px";
-    baseR.style.left = (window.innerWidth - pad) + "px"; baseR.style.top = (window.innerHeight - pad) + "px";
-    knobL.style.transform = knobR.style.transform = "translate(-50%,-50%)";
+    var pad = Math.max(baseHalf + 14, 11 * vmin);
+    putBase(baseL, pad, window.innerHeight - pad);
+    putBase(baseR, window.innerWidth - pad, window.innerHeight - pad);
+    putKnob(knobL, stickL, 0, 0); putKnob(knobR, stickR, 0, 0);
   }
 
-  function stickStart(st, base, knob, e){
+  function stickStart(st, base, e){
     if(st.id !== null) return;
     var t = e.changedTouches[0];
-    st.id = t.identifier; st.cx = t.clientX; st.cy = t.clientY;
-    base.style.left = st.cx + "px"; base.style.top = st.cy + "px";
+    st.id = t.identifier; st.cx = st.tx = t.clientX; st.cy = st.ty = t.clientY;
+    putBase(base, st.cx, st.cy);
     base.classList.add("on");
   }
-  function stickVec(st, base, t){
-    var r = base.offsetWidth / 2;
-    var dx = t.clientX - st.cx, dy = t.clientY - st.cy;
+  // reads the stick as: angle, how far (0..1), and the knob position
+  function stickVec(st){
+    var dx = st.tx - st.cx, dy = st.ty - st.cy;
     var d = Math.hypot(dx, dy);
-    var m = Math.min(1, d / r);
-    var ang = Math.atan2(dy, dx);
-    return { dx: Math.cos(ang) * m, dy: Math.sin(ang) * m, mag: m, ang: ang, r: r };
-  }
-  function moveKnob(knob, v){
-    knob.style.transform = "translate(calc(-50% + " + (v.dx * v.r) + "px), calc(-50% + " + (v.dy * v.r) + "px))";
+    var m = Math.min(1, d / baseHalf);
+    return { ang: Math.atan2(dy, dx), mag: m, kx: (d > baseHalf ? dx / d * baseHalf : dx), ky: (d > baseHalf ? dy / d * baseHalf : dy) };
   }
 
-  zoneL.addEventListener("touchstart", function(e){ e.preventDefault(); stickStart(stickL, baseL, knobL, e); }, { passive:false });
-  zoneR.addEventListener("touchstart", function(e){ e.preventDefault(); stickStart(stickR, baseR, knobR, e); }, { passive:false });
+  zoneL.addEventListener("touchstart", function(e){ e.preventDefault(); stickStart(stickL, baseL, e); }, { passive:false });
+  zoneR.addEventListener("touchstart", function(e){ e.preventDefault(); stickStart(stickR, baseR, e); }, { passive:false });
 
+  // touchmove only remembers where the finger is; the work happens once per frame in tick()
   function onMove(e){
     var used = false;
     for(var i = 0; i < e.changedTouches.length; i++){
       var t = e.changedTouches[i];
-      if(t.identifier === stickL.id){
-        var v = stickVec(stickL, baseL, t);
-        moveKnob(knobL, v);
-        moveDx = v.dx; moveDy = v.dy; moveActive = v.mag > 0.2;
-        applyMoveKeys(v);
-        used = true;
-      } else if(t.identifier === stickR.id){
-        var w = stickVec(stickR, baseR, t);
-        moveKnob(knobR, w);
-        aimAng = w.ang; aimMag = w.mag; aimActive = w.mag > 0.15;
-        used = true;
-      }
+      if(t.identifier === stickL.id){ stickL.tx = t.clientX; stickL.ty = t.clientY; used = true; }
+      else if(t.identifier === stickR.id){ stickR.tx = t.clientX; stickR.ty = t.clientY; used = true; }
     }
     if(used) e.preventDefault();
   }
@@ -14285,11 +14287,11 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
       var t = e.changedTouches[i];
       if(t.identifier === stickL.id){
         stickL.id = null; baseL.classList.remove("on");
-        moveActive = false; moveDx = moveDy = 0; applyMoveKeys({ dx:0, dy:0 });
+        moveActive = false; moveDx = moveDy = 0; window.mobMove.on = false; window.mobMove.x = window.mobMove.y = 0;
         placeDefault();
       } else if(t.identifier === stickR.id){
         stickR.id = null; baseR.classList.remove("on");
-        aimActive = false; aimMag = 0; setFire(false); lastAimAng = null;
+        aimActive = false; aimMag = 0; setFire(false); lastAimAng = null; smoothAng = null;
         try { mouseMoving = false; } catch(e2){}
         placeDefault();
       }
@@ -14299,15 +14301,8 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
   window.addEventListener("touchend", onEnd, { passive:false });
   window.addEventListener("touchcancel", onEnd, { passive:false });
 
-  var held = { w:false, a:false, s:false, d:false };
-  function applyMoveKeys(v){
-    var want = { w: v.dy < -0.38, s: v.dy > 0.38, a: v.dx < -0.38, d: v.dx > 0.38 };
-    for(var k in want){
-      if(want[k] !== held[k]){ held[k] = want[k]; setHeld(k, want[k]); }
-    }
-  }
   function releaseAll(){
-    applyMoveKeys({ dx:0, dy:0 });
+    window.mobMove.on = false; window.mobMove.x = window.mobMove.y = 0;
     setFire(false);
   }
 
@@ -14316,6 +14311,32 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
     firing = on;
     baseR.classList.toggle("fire", on);
     sendKey(on ? "keydown" : "keyup", "e", "KeyE");
+  }
+
+  // ---------- little bit of aim assist ----------
+  var smoothAng = null, assistAng = null, assistFrame = 0;
+  function angDiff(a, b){ return Math.atan2(Math.sin(a - b), Math.cos(a - b)); }
+  function findAssist(ang){
+    var p = pl(), best = null, bestScore = 1e9;
+    if(!p) return null;
+    function scan(list){
+      if(!list) return;
+      for(var i = 0; i < list.length; i++){
+        var t = list[i];
+        if(!t) continue;
+        var dx = t.x - p.x, dy = t.y - p.y;
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if(d > ASSIST_RANGE || d < 8) continue;
+        var a = Math.atan2(dy, dx), df = Math.abs(angDiff(a, ang));
+        if(df > ASSIST_CONE) continue;
+        var score = df + (d / ASSIST_RANGE) * 0.35;      // prefers enemies close to where you point, then nearer ones
+        if(score < bestScore){ bestScore = score; best = a; }
+      }
+    }
+    try { scan(enemies); } catch(e){}
+    try { scan(bossEnemies); } catch(e){}
+    try { scan(worms); } catch(e){}
+    return best;
   }
 
   // ---------- tap the inventory slots on the canvas ----------
@@ -14330,7 +14351,7 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
   var lastShown = "";
   function tick(){
     requestAnimationFrame(tick);
-    if(!enabled) return;
+    if(!enabled || document.hidden) return;
     var st = state(), p = pl();
     var menuOpenInGame = false;
     try { menuOpenInGame = (st === "playing" && mpClientMenuOpen); } catch(e){}
@@ -14338,9 +14359,32 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
     var inMenu = MENU_STATES.indexOf(st) !== -1 || menuOpenInGame;
 
     if(inGame && p && p.alive){
+      // move stick: smooth, any direction, speed depends on how far you push
+      if(stickL.id !== null){
+        var mv = stickVec(stickL);
+        putKnob(knobL, stickL, mv.kx, mv.ky);
+        var f = (mv.mag < MOVE_DEADZONE) ? 0 : Math.min(1, (mv.mag - MOVE_DEADZONE) / (MOVE_FULL_AT - MOVE_DEADZONE));
+        moveActive = f > 0;
+        moveDx = Math.cos(mv.ang) * f; moveDy = Math.sin(mv.ang) * f;
+        window.mobMove.on = moveActive; window.mobMove.x = moveDx; window.mobMove.y = moveDy;
+      }
+      // aim stick
+      if(stickR.id !== null){
+        var av = stickVec(stickR);
+        putKnob(knobR, stickR, av.kx, av.ky);
+        aimAng = av.ang; aimMag = av.mag; aimActive = av.mag > 0.15;
+      }
       if(aimActive){
-        setAimPoint(aimAng);
-        var turned = (lastAimAng === null) ? 0 : Math.abs(Math.atan2(Math.sin(aimAng - lastAimAng), Math.cos(aimAng - lastAimAng)));
+        var useAng = aimAng;
+        if(ASSIST_ON){
+          if((assistFrame++ & 1) === 0) assistAng = findAssist(aimAng);   // look for targets every other frame
+          var wantAng = (assistAng === null) ? aimAng : aimAng + angDiff(assistAng, aimAng) * ASSIST_PULL;
+          var k = (assistAng === null) ? 0.7 : 0.45;
+          smoothAng = (smoothAng === null) ? wantAng : smoothAng + angDiff(wantAng, smoothAng) * k;
+          useAng = smoothAng;
+        }
+        setAimPoint(useAng);
+        var turned = (lastAimAng === null) ? 0 : Math.abs(angDiff(aimAng, lastAimAng));
         lastAimAng = aimAng;
         var wantFire = aimMag > 0.5;
         setFire(wantFire);
@@ -14355,12 +14399,12 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
     var mp = false, isHammer = false, dead = false;
     try { mp = !!mpPartyCode; } catch(e){}
     if(p){ isHammer = (p.currentGunKey === "hammer"); dead = !p.alive; }
-    var key = [inGame, inMenu, st, mp, isHammer, dead, TEXT_STATES.indexOf(st) !== -1].join("|");
+    var key = (inGame ? 1 : 0) + "|" + (inMenu ? 1 : 0) + "|" + st + "|" + (mp ? 1 : 0) + "|" + (isHammer ? 1 : 0) + "|" + (dead ? 1 : 0);
     if(key !== lastShown){
       lastShown = key;
       var showBtn = function(id, on){ buttons[id].classList.toggle("show", !!on); };
       var alive = inGame && !dead;
-      showBtn("dash", alive); showBtn("swap", alive); showBtn("brk", alive); showBtn("drop", alive);
+      showBtn("dash", alive); showBtn("swap", alive); showBtn("brk", alive);
       showBtn("mode", alive && isHammer);
       showBtn("rev", alive && mp);
       showBtn("specL", inGame && dead && mp); showBtn("specR", inGame && dead && mp);
@@ -14381,7 +14425,7 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
     root.style.setProperty("--mc", light ? "#000" : "#fff");
     root.style.setProperty("--mbg", light ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.38)");
     root.style.setProperty("--mhi", light ? "#c00" : "#ff0");
-  }, 600);
+  }, 1000);
 
   // ---------- turn everything on ----------
   function updateRotate(){
@@ -14395,6 +14439,10 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
     root.style.display = "block";
     placeDefault();
     updateRotate();
+    // phones: start at a lighter render quality unless you already picked one in Options
+    try {
+      if(localStorage.getItem("emesis_res_index") === null && resIndex > MOBILE_RES_INDEX){ resIndex = MOBILE_RES_INDEX; applyResolution(); }
+    } catch(e){}
   }
   window.addEventListener("resize", function(){ placeDefault(); updateRotate(); });
   window.addEventListener("orientationchange", function(){ setTimeout(function(){ placeDefault(); updateRotate(); }, 250); });
