@@ -14365,7 +14365,8 @@ spawnTree = function(){ if(eyes.spawnBlock) return; return __eyesSpawnTree.apply
         putKnob(knobL, stickL, mv.kx, mv.ky);
         var f = (mv.mag < MOVE_DEADZONE) ? 0 : Math.min(1, (mv.mag - MOVE_DEADZONE) / (MOVE_FULL_AT - MOVE_DEADZONE));
         moveActive = f > 0;
-        moveDx = Math.cos(mv.ang) * f; moveDy = Math.sin(mv.ang) * f;
+        var fullSpeed = moveActive ? 1 : 0;   // direction only: speed is always the character's normal speed
+        moveDx = Math.cos(mv.ang) * fullSpeed; moveDy = Math.sin(mv.ang) * fullSpeed;
         window.mobMove.on = moveActive; window.mobMove.x = moveDx; window.mobMove.y = moveDy;
       }
       // aim stick
