@@ -372,6 +372,12 @@ let gameState = "title"; // "title", "playing", "gameover", "options", "credits"
 
 let player, bullets, enemies, pickups, gunPickups, blood, dashParticles, dashLines;
 let shake, invertTimer;
+// ---- TIME STOP state ----
+let timeStopLeftMs = 0;     // > 0 while time is stopped (counts down)
+let timeStopMine = false;   // true when YOU used it (your bullets freeze in mid-air)
+let tsShakeLeftMs = 0;      // screen shake at the start
+let tsLastTick = 0;
+let tsMusicRate = 1;      // current music speed (1 = normal)
 let spawnDelay, minSpawnDelay, spawnAccel, lastSpawn;
 let kills, ammoUsed, startTime, endTime;
 
@@ -2383,7 +2389,8 @@ function mpConnect(){
   socket.on("magnetGrant", ()=>{ spawnMagnet(); playSound("https://file.garden/Zfwe_2Ig9weivlFh/pickup.wav"); });
   socket.on("gunGrant", (data)=>{
     const gkey = data.gunKey;
-    if (gkey === "nuke") { ensureInInventory("nuke"); player.nukes=(player.nukes||0)+1; }
+    if (gkey === "timestop") { ensureInInventory("timestop"); player.timestops=(player.timestops||0)+1; }
+    else if (gkey === "nuke") { ensureInInventory("nuke"); player.nukes=(player.nukes||0)+1; }
     else if (player.inventory.includes(gkey)) { player.ammo += 15; }
     else { ensureInInventory(gkey); }
     if(performance.now() > magnetNoSwitchUntil) player.currentGunKey = gkey;
@@ -2565,6 +2572,7 @@ function mpConnect(){
     if(data.hurt){ mpRemoteBlood(data.x, data.y); return; }
     if(data.nblood){ spawnNewBlood(data.x, data.y, data.a || 0, true); return; }
     if(data.gvb){ gravitySpawnBurst(Number(data.x), Number(data.y), Number(data.a), true); return; }
+    if(data.timestop){ mpRemoteTimeStop(data); return; }
     if(data.nuke){ mpRemoteNukeVisual(data); return; }
     if(data.rboom){ mpRemoteRocketBoom(data); return; }
     if(data.mg){
@@ -3900,6 +3908,17 @@ rocketLauncher: {
   recoilBack: 3,
   recoilRecovery: 0.92
 },
+timestop: {
+    name: "Time Stop",
+    glyph: "🕀",
+    fireRateMs: 1000,
+    bulletSpeed: 0,
+    consumePerShot: 0,
+    type: "single",
+    recoilStrength: 0,
+    recoilBack: 0,
+    recoilRecovery: 1
+},
 nuke: {
     name: "Nuke",
     glyph: "☢",
@@ -3987,7 +4006,7 @@ blackhole: {
 };
 
 // Which guns can spawn on the ground (not pistol)
-const SPAWNABLE_GUN_KEYS = ["sniper","uzi","shotgun","doublebarrel","machinegun","hammer","nuke","railgun","blackhole","gravitygun"];
+const SPAWNABLE_GUN_KEYS = ["sniper","uzi","shotgun","doublebarrel","machinegun","hammer","nuke","timestop","railgun","blackhole","gravitygun"];
 
 // Higher number = more common. Railgun and blackhole are rarer than the rest.
 const GUN_SPAWN_WEIGHTS = {
@@ -3998,6 +4017,7 @@ const GUN_SPAWN_WEIGHTS = {
   machinegun: 10,
   hammer: 10,
   nuke: 10,
+  timestop: 6,
   railgun: 7,
   blackhole: 3,
   gravitygun: 6
@@ -4133,7 +4153,7 @@ function resetGame(){
   mpMagnetPulling = false;
 
   // reset screen effects
-  shake = 0; invertTimer = 0;
+  shake = 0; invertTimer = 0; timeStopLeftMs = 0; timeStopMine = false; tsShakeLeftMs = 0; tsMusicRate = 1; try { bgMusic.playbackRate = 1; } catch(e) {}
   shakeX = 0; shakeY = 0; shakeTime = 0; flashAlpha = 0;
   hsFlashStart = 0; hsFlashDone = false;
 
@@ -5441,6 +5461,174 @@ function fireHammer(now) {
   );
 
   player.lastShotTime = now;
+}
+
+// =====================================================================
+//  TIME STOP  (weapon "timestop", glyph 🕀)
+// =====================================================================
+const TIMESTOP_SECONDS = 10;        // how long time stays stopped
+const TIMESTOP_SOUND_URL = "";      // optional: paste a link to your own sound here. Empty = built-in sound
+
+
+// true while the ENEMIES are frozen (on everybody's machine, host included)
+function tsEnemiesFrozen(){ return timeStopLeftMs > 0; }
+
+// called once every frame from update()
+function tsTick(){
+  const nowT = performance.now();
+  const dtT = Math.min(100, nowT - (tsLastTick || nowT));   // paused game = no time passes
+  tsLastTick = nowT;
+  if (timeStopLeftMs > 0) {
+    timeStopLeftMs -= dtT;
+    if (tsShakeLeftMs > 0) {
+      tsShakeLeftMs -= dtT;
+      shake = Math.max(shake, 40);   // shakes the whole screen (follows your camera-shake setting)
+    }
+    if (timeStopLeftMs <= 0) { timeStopLeftMs = 0; timeStopMine = false; tsReleaseBullets(); }
+  }
+}
+
+// smooth invert in -> hold -> smooth invert out (CSS filter on the whole page)
+function tsInvertPulse(){
+  const el = document.documentElement;
+  el.style.transition = "filter 0.45s ease-in-out";
+  el.style.filter = "invert(1)";
+  setTimeout(() => {
+    el.style.transition = "filter 0.7s ease-in-out";
+    el.style.filter = "invert(0)";
+  }, 1000);
+  setTimeout(() => {
+    el.style.filter = "";
+    el.style.transition = "";
+  }, 1800);
+}
+
+// plays YOUR sound (the link you put in TIMESTOP_SOUND_URL above)
+function tsPlaySound(){
+  if (TIMESTOP_SOUND_URL) playSound(TIMESTOP_SOUND_URL);
+}
+
+// same ring + particles as the nuke (but it doesn't kill anything)
+function tsRingEffect(x, y, count){
+  nukeRings.push({ x: x, y: y, radius: 1, maxRadius: 2600, speed: 12, alive: true });
+  for (let i = 0; i < count; i++) {
+    blood.push({
+      x: x, y: y,
+      dx: (Math.random() - 0.5) * 18,
+      dy: (Math.random() - 0.5) * 18,
+      life: 50,
+      color: "orange",
+      char: ["*", "✦", "•"][Math.floor(Math.random() * 3)]
+    });
+  }
+}
+
+// the in-game soundtrack (bgMusic) smoothly slows down when time stops, stays slow, then smoothly speeds back up
+const TIMESTOP_MUSIC_SPEED = 0.5;   // 1 = normal speed, 0.5 = half speed (lower = slower)
+function tsMusicTick(){
+  const target = timeStopLeftMs > 0 ? TIMESTOP_MUSIC_SPEED : 1;
+  if (Math.abs(tsMusicRate - target) < 0.005) tsMusicRate = target;
+  else tsMusicRate += (target - tsMusicRate) * 0.08;   // bigger number = faster change
+  const tracks = [bgMusic];
+  try { if (typeof bossTheme !== "undefined") tracks.push(bossTheme); } catch (e) {}
+  tracks.forEach(a => {
+    try {
+      a.preservesPitch = false;
+      a.mozPreservesPitch = false;
+      a.webkitPreservesPitch = false;
+      if (a.playbackRate !== tsMusicRate) a.playbackRate = tsMusicRate;
+    } catch (e) {}
+  });
+}
+setInterval(tsMusicTick, 30);   // runs on its own timer so it is always smooth
+
+// YOU use the time stop
+function startTimeStop(){
+  timeStopLeftMs = TIMESTOP_SECONDS * 1000;
+  timeStopMine = true;
+  tsShakeLeftMs = 1000;
+  tsLastTick = performance.now();
+  tsInvertPulse();
+  tsPlaySound();
+  shake = 60;
+  // tell everyone else: enemies freeze for them too, but the other players keep moving
+  if (socket && mpPartyCode) {
+    socket.emit("bulletFired", { id: socket.id, x: mpR(player.x), y: mpR(player.y), dx: 0, dy: 0, timestop: 1 });
+  }
+}
+
+// SOMEONE ELSE used it: the enemies freeze, you do NOT (no invert, your bullets keep flying)
+function mpRemoteTimeStop(data){
+  timeStopLeftMs = TIMESTOP_SECONDS * 1000;
+  timeStopMine = false;
+  tsShakeLeftMs = 400;
+  tsLastTick = performance.now();
+  tsPlaySound();
+}
+
+function fireTimeStop(now){
+  const g = GUNS.timestop;
+  if (!canFireNow(now, g)) return;
+  if (timeStopLeftMs > 0) return;          // time is already stopped
+  player.lastShotTime = now;
+  startTimeStop();
+  // use up one; remove it from the inventory once you're out
+  player.timestops = Math.max(0, (player.timestops || 0) - 1);
+  if (player.timestops <= 0) {
+    const idxT = player.inventory.indexOf("timestop");
+    if (idxT !== -1) {
+      player.inventory.splice(idxT, 1);
+      player.currentGunKey = "pistol";     // so you can shoot your frozen bullets right away
+    }
+  }
+}
+
+// countdown text at the top of the screen (Times New Roman, plain: no bold, no outline)
+function tsDrawCountdown(){
+  if (timeStopLeftMs <= 0) return;
+  const secs = Math.max(0, timeStopLeftMs / 1000);
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "34px 'Times New Roman', Times, serif";
+  ctx.fillStyle = lightMode ? "black" : "white";
+  ctx.fillText("TIME STOP  " + secs.toFixed(1), canvas.width / 2, 36);
+  ctx.restore();
+}
+
+let tsHadHeld = false;
+
+// keeps one bullet frozen (its line included). Called every frame while time is stopped.
+function tsFreezeBullet(b){
+  if (!b.tsHeld) {
+    b.tsHeld = true;
+    b.tsNew = !b.enemyBullet && !b.tsOld;      // fired DURING the time stop
+    if (!b.trail) b.trail = [];
+    if (b.trail.length === 0) {                // brand new bullet: give it its line right away
+      for (let k = 7; k >= 0; k--) b.trail.push({ x: b.x - b.dx * k, y: b.y - b.dy * k, life: 8 - k });
+    }
+    b.tsTrail = b.trail.map(t => ({ x: t.x, y: t.y, life: t.life }));
+    tsHadHeld = true;
+  } else {
+    // the game fades trails while drawing, so put the line back every frame
+    b.trail = b.tsTrail.map(t => ({ x: t.x, y: t.y, life: t.life }));
+  }
+}
+
+// time restarts: all frozen bullets go, and the shoot sound plays again
+function tsReleaseBullets(){
+  if (!tsHadHeld) return;
+  tsHadHeld = false;
+  let shot = false, rocket = false;
+  bullets.forEach(b => {
+    if (!b.tsHeld) return;
+    b.tsHeld = false;
+    b.tsTrail = null;
+    if (b.tsNew) { if (b.isRocket) rocket = true; else shot = true; }
+    b.tsNew = false;
+  });
+  if (shot) playSound("https://file.garden/Zfwe_2Ig9weivlFh/shoot.wav");
+  if (rocket) playSound("https://file.garden/Zfwe_2Ig9weivlFh/rocket%20launcher%20shoot.wav");
 }
 
 function performNukeExplosion() {
@@ -7311,6 +7499,7 @@ function update(time){
    if (mpHostPaused && isMultiplayerClient) return; // host is paused — freeze until they resume
    if (mpClientMenuOpen && mpIsJoinedClient()) { keys = {}; mouseDown = false; if(player) player.shootingHeld = false; }  // menu open: you stand still
    updateMagnet();
+   tsTick();
    hostCheckPickupCollisions();
    Object.values(remotePlayers).forEach(rp=>{
      if(rp.displayX===undefined) rp.displayX = rp.x;
@@ -7606,6 +7795,7 @@ else if(player.alive && player.shootingHeld){
         case "machinegun":fireMachineGun(now); break;
         case "hammer": fireHammer(now); break;
         case "nuke": fireNuke(now); break;
+        case "timestop": fireTimeStop(now); break;
         case "turret": fireTurret(now); break;
         case "railgun": chargeRailgun(now); break;
         case "blackhole": fireBlackHole(now); break;
@@ -7837,6 +8027,13 @@ if (Math.abs(diff) < 0.1 && t.cooldown <= 0) {
   // ===== END TURRET UPDATE =====
 
 
+  // ---- TIME STOP: bullets hang in mid-air (they all fly again when time restarts) ----
+  var tsHeldBullets = [];
+  if (timeStopLeftMs > 0) {
+    tsHeldBullets = bullets.filter(b => b.enemyBullet || timeStopMine);
+    tsHeldBullets.forEach(tsFreezeBullet);
+    if (tsHeldBullets.length) bullets = bullets.filter(b => !(b.enemyBullet || timeStopMine));
+  }
   // ---- Bullets movement and trails ----
   const dt = 1/60;
   for (let i = bullets.length - 1; i >= 0; i--) {
@@ -8416,6 +8613,7 @@ killPopColor = 1.2;     // deeper red flash
 
 
 bullets = bullets.filter(isProjectileStillActive);
+if (typeof tsHeldBullets !== "undefined" && tsHeldBullets.length) bullets = bullets.concat(tsHeldBullets);   // TIME STOP: put the frozen bullets back
 // ===== MULTIPLAYER CLIENT: enemies touching ME hurt me (host only checks its own player) =====
 if(isMultiplayerClient && player.alive && !inCar){
   for(let ci = 0; ci < enemies.length; ci++){
@@ -8432,6 +8630,7 @@ if(!isMultiplayerClient){
 enemies.forEach((e, ei) => {
   // calculate angle toward nearest player
   if (e.gravity) return;   // the gravity gun has this one
+  if (tsEnemiesFrozen()) return;   // TIME STOP: this enemy is frozen
   const __nearestP = findNearestPlayerPos(e.x, e.y);
   if(!__nearestP) return; // nobody alive to chase — stand still this frame
   let ang = Math.atan2(__nearestP.y - e.y, __nearestP.x - e.x);
@@ -8907,7 +9106,7 @@ if (survivalMs > WORM_WARN_TIME && !tutorialActive && !isMultiplayerClient && !w
 }
 
 // --- update worms each frame ---
-if (worms.length > 0 && !isMultiplayerClient) {
+if (worms.length > 0 && !isMultiplayerClient && !tsEnemiesFrozen()) {
   updateWorms();
 }
 
@@ -8915,6 +9114,7 @@ if (worms.length > 0 && !isMultiplayerClient) {
   if(!isMultiplayerClient){
   bossEnemies.forEach(e=>{
     if (e.gravity) return;   // the gravity gun has this one
+    if (tsEnemiesFrozen()) { e.lastShot = performance.now(); return; }   // TIME STOP: frozen, no shooting
     const __nearestB = findNearestPlayerPos(e.x, e.y);
     if(!__nearestB) return;
     let ang = Math.atan2(__nearestB.y-e.y,__nearestB.x-e.x);
@@ -9037,7 +9237,10 @@ bricks.forEach((b, bi) => {
     const gLocalX = gdx * Math.cos(gunRot) + gdy * Math.sin(gunRot);
     const gLocalY = -gdx * Math.sin(gunRot) + gdy * Math.cos(gunRot);
     if(Math.abs(gLocalX) < gunHalfW && Math.abs(gLocalY) < gunHalfH){
-      if (g.gunKey === "nuke") {
+      if (g.gunKey === "timestop") {
+        ensureInInventory("timestop");
+        player.timestops = (player.timestops || 0) + 1;
+      } else if (g.gunKey === "nuke") {
         ensureInInventory("nuke");
         player.nukes = (player.nukes || 0) + 1;
       } else if (player.inventory.includes(g.gunKey)) {
@@ -9175,10 +9378,10 @@ for (let i = explosionRings.length - 1; i >= 0; i--) {
   player.recoilBack *= 0.88;
 
   if(wavesActive()){
-    updateWaves();
+    if(!tsEnemiesFrozen()) updateWaves();
   } else if(playerActive()){
     playerBotUpdate();
-  } else if(!tutorialActive && !isMultiplayerClient && time - lastSpawn > spawnDelay / mpEnemyMult()){
+  } else if(!tutorialActive && !isMultiplayerClient && time - lastSpawn > spawnDelay / mpEnemyMult() && !tsEnemiesFrozen()){
     spawnEnemy();
     lastSpawn = time;
     spawnDelay = Math.max(minSpawnDelay, spawnDelay * spawnAccel);
@@ -10887,7 +11090,7 @@ eyesDrawWorld();
 // DRAW BRICKS
 bricks.forEach(b => {
 
-    cmText("brick", "⊠", b.x, b.y);
+    cmText("brick", "⊠", b.x, b.y + Math.sin(performance.now() * 0.006 + (b.id || 0) * 1.7) * 3);
 });
 
 
@@ -11314,11 +11517,11 @@ ctx.restore();
     });
 
     // Ammo pickups
-    pickups.forEach(p=>cmText("ammo", "¤", p.x, p.y));
+    pickups.forEach(p=>cmText("ammo", "¤", p.x, p.y + Math.sin(performance.now() * 0.006 + (p.id || 0) * 1.7) * 3));
 
-healthKits.forEach(h => cmText("health", "+", h.x, h.y));
+healthKits.forEach(h => cmText("health", "+", h.x, h.y + Math.sin(performance.now() * 0.006 + (h.id || 0) * 1.7) * 3));
 
-Magnetpickup.forEach(h => cmText("magnet", "ᘰ", h.x, h.y));
+Magnetpickup.forEach(h => cmText("magnet", "ᘰ", h.x, h.y + Math.sin(performance.now() * 0.006 + (h.id || 0) * 1.7) * 3));
 
     // Gun pickups
 gunPickups.forEach(g=>{
@@ -11624,6 +11827,7 @@ ctx.restore();
 drawInventory();
 drawMiniMap();
 drawWavesHUD();
+tsDrawCountdown();
 if (window.nukeFlashA > 0) {
   ctx.save();
   ctx.fillStyle = `rgba(255,255,255,${window.nukeFlashA})`;
@@ -13695,10 +13899,10 @@ function eyesBeginFade(){
     g.push({ t: e.bird, x: e.x, y: e.y });
   });
   bossEnemies.forEach(e => g.push({ t: e.gug ? "𓅃" : "♀", x: e.x, y: e.y }));
-  pickups.forEach(p => g.push({ t: "¤", x: p.x, y: p.y }));
-  healthKits.forEach(h => g.push({ t: "+", x: h.x, y: h.y }));
-  Magnetpickup.forEach(m => g.push({ t: "ᘰ", x: m.x, y: m.y }));
-  bricks.forEach(b => g.push({ t: "⊠", x: b.x, y: b.y }));
+  pickups.forEach(p => g.push({ t: "¤", x: p.x, y: p.y + Math.sin(performance.now() * 0.006 + (p.id || 0) * 1.7) * 3 }));
+  healthKits.forEach(h => g.push({ t: "+", x: h.x, y: h.y + Math.sin(performance.now() * 0.006 + (h.id || 0) * 1.7) * 3 }));
+  Magnetpickup.forEach(m => g.push({ t: "ᘰ", x: m.x, y: m.y + Math.sin(performance.now() * 0.006 + (m.id || 0) * 1.7) * 3 }));
+  bricks.forEach(b => g.push({ t: "⊠", x: b.x, y: b.y + Math.sin(performance.now() * 0.006 + (b.id || 0) * 1.7) * 3 }));
   cars.forEach(c => g.push({ t: c.glyph, x: c.x, y: c.y }));
   gunPickups.forEach(gp => g.push({ t: gp.glyph, x: gp.x, y: gp.y + Math.sin(gp.bob || 0) * 3, rot: gp.rotation || 0 }));
   eyes.ghosts = g;
