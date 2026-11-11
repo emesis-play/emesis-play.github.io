@@ -2964,14 +2964,29 @@ function gunColorFor(key){
 }
 // draws text in the type's color when Color Mode is on, normal text color when it's off
 function cmText(type, text, x, y){
+  const isEnemyType = (type === "enemy" || type === "treeEnemy" || type === "shooter");
   if(colorMode){
     ctx.save();
     ctx.fillStyle = COLOR_MODE_COLORS[type];
-    if(type === "enemy" || type === "treeEnemy" || type === "shooter") ctx.font = "bold " + ctx.font;
+
     ctx.fillText(text, x, y);
+    if(isEnemyType){
+      ctx.strokeStyle = COLOR_MODE_COLORS[type];
+      ctx.lineWidth = 0.25;          // make this bigger for bolder enemies, smaller for less bold
+      ctx.lineJoin = "round";
+      ctx.strokeText(text, x, y);
+    }
     ctx.restore();
   } else {
     ctx.fillText(text, x, y);
+    if(isEnemyType){
+      ctx.save();
+      ctx.strokeStyle = ctx.fillStyle;   // same color as the enemy text
+      ctx.lineWidth = 0.25;               // make this bigger for bolder enemies, smaller for less bold
+      ctx.lineJoin = "round";
+      ctx.strokeText(text, x, y);
+      ctx.restore();
+    }
   }
 }
 let playerHue = -1;       // -1 = default color, otherwise 0-359 (hue only)
@@ -5484,7 +5499,7 @@ function tsTick(){
       tsShakeLeftMs -= dtT;
       shake = Math.max(shake, 40);   // shakes the whole screen (follows your camera-shake setting)
     }
-    if (timeStopLeftMs <= 0) { timeStopLeftMs = 0; timeStopMine = false; tsReleaseBullets(); }
+    if (timeStopLeftMs <= 0) { timeStopLeftMs = 0; if (timeStopMine) tsInvertPulse(); timeStopMine = false; tsReleaseBullets(); }
   }
 }
 
@@ -5583,20 +5598,24 @@ function fireTimeStop(now){
   }
 }
 
-// countdown text at the top of the screen (Times New Roman, plain: no bold, no outline)
+// the Time Stop countdown is hidden on purpose (you can't see how long is left)
 function tsDrawCountdown(){
-  if (timeStopLeftMs <= 0) return;
-  const secs = Math.max(0, timeStopLeftMs / 1000);
-  ctx.save();
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = "34px 'Times New Roman', Times, serif";
-  ctx.fillStyle = lightMode ? "black" : "white";
-  ctx.fillText("TIME STOP  " + secs.toFixed(1), canvas.width / 2, 36);
-  ctx.restore();
+  return;
 }
 
 let tsHadHeld = false;
+
+// clock used for the item bobbing animation: it stops while time is stopped, then carries on from where it was
+let tsBobOffset = 0, tsBobFrozenAt = 0;
+function tsBobTime(){
+  const n = performance.now();
+  if (timeStopLeftMs > 0) {
+    if (!tsBobFrozenAt) tsBobFrozenAt = n;
+    return tsBobFrozenAt - tsBobOffset;
+  }
+  if (tsBobFrozenAt) { tsBobOffset += n - tsBobFrozenAt; tsBobFrozenAt = 0; }
+  return n - tsBobOffset;
+}
 
 // keeps one bullet frozen (its line included). Called every frame while time is stopped.
 function tsFreezeBullet(b){
@@ -9222,7 +9241,7 @@ bricks.forEach((b, bi) => {
 });
 
 
-  gunPickups.forEach(g=>{ g.bob += 0.1; });
+  if (timeStopLeftMs <= 0) gunPickups.forEach(g=>{ g.bob += 0.1; });
   gunPickups.forEach((g, gi)=>{
     // hitbox = the real shape of the gun's glyph (rotated with it), not a circle
     ctx.save();
@@ -11090,7 +11109,7 @@ eyesDrawWorld();
 // DRAW BRICKS
 bricks.forEach(b => {
 
-    cmText("brick", "⊠", b.x, b.y + Math.sin(performance.now() * 0.006 + (b.id || 0) * 1.7) * 3);
+    cmText("brick", "⊠", b.x, b.y + Math.sin(tsBobTime() * 0.006 + (b.id || 0) * 1.7) * 3);
 });
 
 
@@ -11517,11 +11536,11 @@ ctx.restore();
     });
 
     // Ammo pickups
-    pickups.forEach(p=>cmText("ammo", "¤", p.x, p.y + Math.sin(performance.now() * 0.006 + (p.id || 0) * 1.7) * 3));
+    pickups.forEach(p=>cmText("ammo", "¤", p.x, p.y + Math.sin(tsBobTime() * 0.006 + (p.id || 0) * 1.7) * 3));
 
-healthKits.forEach(h => cmText("health", "+", h.x, h.y + Math.sin(performance.now() * 0.006 + (h.id || 0) * 1.7) * 3));
+healthKits.forEach(h => cmText("health", "+", h.x, h.y + Math.sin(tsBobTime() * 0.006 + (h.id || 0) * 1.7) * 3));
 
-Magnetpickup.forEach(h => cmText("magnet", "ᘰ", h.x, h.y + Math.sin(performance.now() * 0.006 + (h.id || 0) * 1.7) * 3));
+Magnetpickup.forEach(h => cmText("magnet", "ᘰ", h.x, h.y + Math.sin(tsBobTime() * 0.006 + (h.id || 0) * 1.7) * 3));
 
     // Gun pickups
 gunPickups.forEach(g=>{
@@ -11540,7 +11559,7 @@ gunPickups.forEach(g=>{
 cars.forEach(car => {
   const yo = Math.sin(car.bob) * 3;
   cmText("car", car.glyph, car.x, car.y + yo);
-  car.bob += 0.1;
+  if (timeStopLeftMs <= 0) car.bob += 0.1;
 });
 
 
