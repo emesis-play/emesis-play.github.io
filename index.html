@@ -2393,6 +2393,7 @@ function mpConnect(){
     else if (gkey === "nuke") { ensureInInventory("nuke"); player.nukes=(player.nukes||0)+1; }
     else if (player.inventory.includes(gkey)) { player.ammo += 15; }
     else { ensureInInventory(gkey); }
+    if (GUNS[gkey]) spawnFloatText(GUNS[gkey].name, player.x, player.y - 12, "yellow");
     if(performance.now() > magnetNoSwitchUntil) player.currentGunKey = gkey;
     playSound("https://file.garden/Zfwe_2Ig9weivlFh/pickup.wav");
   });
@@ -2972,7 +2973,7 @@ function cmText(type, text, x, y){
     ctx.fillText(text, x, y);
     if(isEnemyType){
       ctx.strokeStyle = COLOR_MODE_COLORS[type];
-      ctx.lineWidth = 0.25;          // make this bigger for bolder enemies, smaller for less bold
+      ctx.lineWidth = 0.6;          // make this bigger for bolder enemies, smaller for less bold
       ctx.lineJoin = "round";
       ctx.strokeText(text, x, y);
     }
@@ -2982,7 +2983,7 @@ function cmText(type, text, x, y){
     if(isEnemyType){
       ctx.save();
       ctx.strokeStyle = ctx.fillStyle;   // same color as the enemy text
-      ctx.lineWidth = 0.25;               // make this bigger for bolder enemies, smaller for less bold
+      ctx.lineWidth = 0.6;               // make this bigger for bolder enemies, smaller for less bold
       ctx.lineJoin = "round";
       ctx.strokeText(text, x, y);
       ctx.restore();
@@ -4020,8 +4021,21 @@ blackhole: {
 
 };
 
+GUNS.megacannon = {
+  name: "Mega Cannon",
+  glyph: "⛿",              // the flag on the ground + in the inventory slot
+  art: true,                // when held, it is drawn as the big gun drawing instead
+  fireRateMs: 1500,         // cooldown after a shot before you can start charging again
+  bulletSpeed: 10,          // half the pistol's speed (the pistol is 20)
+  consumePerShot: 0,
+  type: "mega",
+  recoilStrength: 14,
+  recoilBack: 24,
+  recoilRecovery: 0.8
+};
+
 // Which guns can spawn on the ground (not pistol)
-const SPAWNABLE_GUN_KEYS = ["sniper","uzi","shotgun","doublebarrel","machinegun","hammer","nuke","timestop","railgun","blackhole","gravitygun"];
+const SPAWNABLE_GUN_KEYS = ["sniper","uzi","shotgun","doublebarrel","machinegun","hammer","nuke","timestop","railgun","blackhole","gravitygun","megacannon"];
 
 // Higher number = more common. Railgun and blackhole are rarer than the rest.
 const GUN_SPAWN_WEIGHTS = {
@@ -4032,10 +4046,11 @@ const GUN_SPAWN_WEIGHTS = {
   machinegun: 10,
   hammer: 10,
   nuke: 10,
-  timestop: 6,
+  timestop: 4,
   railgun: 7,
   blackhole: 3,
-  gravitygun: 6
+  gravitygun: 6,
+  megacannon: 3
 };
 
 function pickWeightedGunKey(){
@@ -4168,7 +4183,7 @@ function resetGame(){
   mpMagnetPulling = false;
 
   // reset screen effects
-  shake = 0; invertTimer = 0; timeStopLeftMs = 0; timeStopMine = false; tsShakeLeftMs = 0; tsMusicRate = 1; try { bgMusic.playbackRate = 1; } catch(e) {}
+  shake = 0; invertTimer = 0; timeStopLeftMs = 0; timeStopMine = false; tsShakeLeftMs = 0; tsMusicRate = 1; try { bgMusic.playbackRate = 1; } catch(e) {} megaReset();
   shakeX = 0; shakeY = 0; shakeTime = 0; flashAlpha = 0;
   hsFlashStart = 0; hsFlashDone = false;
 
@@ -5033,9 +5048,9 @@ function consumeAmmo(n){
 
 // ===== FLOATING TEXT ("+5 ammo", "+25 health") =====
 let floatTexts = [];
-function spawnFloatText(text, x, y){
+function spawnFloatText(text, x, y, color){
   if(floatTexts.length > 30) floatTexts.shift();
-  floatTexts.push({ text: text, x: x, y: y, life: 100, maxLife: 100 });
+  floatTexts.push({ text: text, x: x, y: y, life: 100, maxLife: 100, color: color });
 }
 function updateFloatTexts(){
   for(let i = floatTexts.length - 1; i >= 0; i--){
@@ -5050,8 +5065,8 @@ function drawFloatTexts(){
   ctx.save();
   ctx.font = "14px sans-serif";
   ctx.textAlign = "center";
-  ctx.fillStyle = lightMode ? "black" : "white";
   floatTexts.forEach(f => {
+    ctx.fillStyle = f.color || (lightMode ? "black" : "white");
     ctx.globalAlpha = Math.max(0, Math.min(1, f.life / f.maxLife * 1.6));   // stays solid for a moment, then fades
     ctx.fillText(f.text, f.x, f.y);
   });
@@ -5482,7 +5497,7 @@ function fireHammer(now) {
 //  TIME STOP  (weapon "timestop", glyph 🕀)
 // =====================================================================
 const TIMESTOP_SECONDS = 10;        // how long time stays stopped
-const TIMESTOP_SOUND_URL = "";      // optional: paste a link to your own sound here. Empty = built-in sound
+const TIMESTOP_SOUND_URL = "https://file.garden/Zfwe_2Ig9weivlFh/TimeStop.wav";      // optional: paste a link to your own sound here. Empty = built-in sound
 
 
 // true while the ENEMIES are frozen (on everybody's machine, host included)
@@ -5559,6 +5574,15 @@ setInterval(tsMusicTick, 30);   // runs on its own timer so it is always smooth
 
 // YOU use the time stop
 function startTimeStop(){
+  {
+    const cam = getCameraState();
+    const a = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+    tsFlyFx.push({
+      sx: (player.x + Math.cos(a) * 20) * cam.zoom + cam.x,
+      sy: (player.y + Math.sin(a) * 20) * cam.zoom + cam.y,
+      t0: performance.now()
+    });
+  }
   timeStopLeftMs = TIMESTOP_SECONDS * 1000;
   timeStopMine = true;
   tsShakeLeftMs = 1000;
@@ -5599,8 +5623,39 @@ function fireTimeStop(now){
 }
 
 // the Time Stop countdown is hidden on purpose (you can't see how long is left)
+let tsFlyFx = [];
+const TS_FLY_MS = 1400;
+const TS_FLY_SCALE = 34;
+
 function tsDrawCountdown(){
-  return;
+  if(!tsFlyFx.length) return;
+  const now = performance.now();
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = lightMode ? "black" : "white";
+  ctx.font = "24px sans-serif";
+  for(let i = tsFlyFx.length - 1; i >= 0; i--){
+    const f = tsFlyFx[i];
+    const t = (now - f.t0) / TS_FLY_MS;
+    if(t >= 1){ tsFlyFx.splice(i, 1); continue; }
+
+    const move = t * t * (3 - 2 * t);
+    const x = f.sx + (canvas.width / 2 - f.sx) * move;
+    const y = f.sy + (canvas.height / 2 - f.sy) * move;
+    const scale = 1 + (TS_FLY_SCALE - 1) * t * t * t;
+    const alpha = t < 0.35 ? 1 : 1 - (t - 0.35) / 0.65;
+    const spin = t * 0.6;
+
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, alpha);
+    ctx.translate(x, y);
+    ctx.rotate(spin);
+    ctx.scale(scale, scale);
+    ctx.fillText(GUNS.timestop.glyph, 0, 0);
+    ctx.restore();
+  }
+  ctx.restore();
 }
 
 let tsHadHeld = false;
@@ -7482,6 +7537,343 @@ if (tree && tree.state === "spawning2") {
 }
 
 
+// =====================================================================
+//  MEGA CANNON  (flag pickup "⛿" -> big gun -> one huge bouncing bullet)
+// =====================================================================
+const MEGA_ART = [
+  ' ____         __Д.,.,.,.,.,.,.,.,.,.,.,.,.,.,.,.,Д.,.,.,.,.,.,.,_',
+  '\\ \\     \\_/_\\      -o    ===       ------  ;;;;;;;;;;;;;;;;;;;;▄▄▄▄▄▄    ',
+  '/_-----   /    /(/_)‾‾‾ ██/‾‾ {_/‾     " " (_-___}----------------------------------------------------',
+  '           /__/            {██}  '
+];
+const MEGA_GUN_FONT      = 8;     // size of the gun drawing (bigger number = bigger gun)
+const MEGA_GUN_SQUISH    = 0.4;   // squishes the gun lengthwise (1 = original length, 0.4 = 40% as long, no characters removed)
+const MEGA_CHARGE_MS     = 700;   // how long the pull-back + white fade takes
+const MEGA_PULLBACK      = 120;    // how far (px) the gun is pulled back at the end of the charge
+const MEGA_BULLET_GLYPH  = "⁍";
+const MEGA_BULLET_SIZE   = 540;    // size of the bullet (bigger number = bigger bullet)
+const MEGA_HIT_R         = 228;    // how close an enemy has to be to the middle of the bullet to die
+const MEGA_BOUNCES       = 5;     // wall bounces before it flies away
+const MEGA_BOUNCE_PAD    = 120;    // how far from the screen edge it bounces
+const MEGA_SHOOT_SHAKE   = 70;    // screen shake when it fires
+const MEGA_BOUNCE_SHAKE  = 65;    // screen shake every time it hits a wall
+const MEGA_AMMO_COST     = 0;     // ammo used per shot (0 = free)
+
+const mega = { phase: 0, t: 0, white: 0 };   // phase 0 = idle, 1 = charging
+let megaBullets = [];
+let __megaLen = 0;
+
+// how long the gun drawing is (so the bullet comes out of the end of the barrel)
+function megaArtLen(){
+  if (!__megaLen) {
+    ctx.save();
+    ctx.font = MEGA_GUN_FONT + "px monospace";
+    let w = 0;
+    MEGA_ART.forEach(l => { w = Math.max(w, ctx.measureText(l).width); });
+    ctx.restore();
+    __megaLen = 15 + w * MEGA_GUN_SQUISH;
+  }
+  return __megaLen;
+}
+
+// draws the gun drawing, 4 lines, centred on the aim line
+function megaDrawArt(x, y){
+  const size = MEGA_GUN_FONT, lh = size * 1.05;
+  ctx.save();
+  ctx.font = size + "px monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  const top = y - lh * 1.5 + size * 0.35;
+  ctx.translate(x, 0);
+  ctx.scale(MEGA_GUN_SQUISH, 1);
+  MEGA_ART.forEach((line, i) => ctx.fillText(line, 0, top + i * lh));
+  ctx.restore();
+}
+
+function megaCancel(){
+  mega.phase = 0; mega.t = 0; mega.white = 0;
+  if (player) { player.megaProg = 0; player.megaBack = 0; }
+}
+
+function megaReset(){
+  megaCancel();
+  megaBullets.length = 0;
+  if (player) player.megaLock = false;
+}
+
+// you pressed shoot: start the 0.7 second charge (one press only, holding the key does not repeat)
+function fireMegaCannon(now){
+  const g = GUNS.megacannon;
+  if (mega.phase !== 0) return;
+  if (player.megaLock) return;
+  if (!canFireNow(now, g)) return;
+  if (MEGA_AMMO_COST > 0 && !consumeAmmo(MEGA_AMMO_COST)) return;
+  player.megaLock = true;
+  mega.phase = 1;
+  mega.t = 0;
+  mega.white = 0;
+  playSound("https://file.garden/Zfwe_2Ig9weivlFh/cannon_pullback.wav");
+}
+
+// the charge is over: the white cuts away and the big bullet leaves the barrel
+function megaShoot(){
+  const g = GUNS.megacannon;
+  const angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  const len = megaArtLen();
+
+  let bnd;
+  if (openWorldMode) bnd = { l: player.x - canvas.width / 2, r: player.x + canvas.width / 2, t: player.y - canvas.height / 2, b: player.y + canvas.height / 2 };
+  else bnd = { l: 0, r: canvas.width, t: 0, b: canvas.height };
+
+  let sx = player.x + Math.cos(angle) * len;
+  let sy = player.y + Math.sin(angle) * len;
+  sx = Math.max(bnd.l + MEGA_BOUNCE_PAD, Math.min(bnd.r - MEGA_BOUNCE_PAD, sx));
+  sy = Math.max(bnd.t + MEGA_BOUNCE_PAD, Math.min(bnd.b - MEGA_BOUNCE_PAD, sy));
+
+  megaBullets.push({
+    x: sx, y: sy,
+    dx: Math.cos(angle) * g.bulletSpeed,
+    dy: Math.sin(angle) * g.bulletSpeed,
+    bouncesLeft: MEGA_BOUNCES,
+    bnd: bnd,
+    trail: [],
+    bossCd: 0
+  });
+
+  player.lastShotTime = performance.now();
+  mega.phase = 0; mega.t = 0; mega.white = 0;       // white cuts away instantly
+  player.megaProg = 0; player.megaBack = 0;
+
+  // one shot only: the Mega Cannon is used up and removed from the inventory
+  const megaIdx = player.inventory.indexOf("megacannon");
+  if (megaIdx !== -1) {
+    player.inventory.splice(megaIdx, 1);
+    player.currentGunKey = player.inventory[0] || "pistol";
+  }
+
+  // recoil
+  const flip = (mouse.x < player.x) ? -1 : 1;
+  player.recoilAngle = 0;
+  player.recoilBack = 0;
+  player.recoilVelAngle = -((g.recoilStrength * Math.PI) / 180) * 0.5 * 3 * flip;
+  player.recoilVelBack = g.recoilBack * 0.5 * 3;
+  player._lastRecoilRecovery = g.recoilRecovery;
+
+  shake = MEGA_SHOOT_SHAKE;
+  playSound("https://file.garden/Zfwe_2Ig9weivlFh/cannon_fire.wav");
+  for (let i = 0; i < 60; i++) {
+    const a = angle + (Math.random() - 0.5) * 1.4;
+    const sp = 2 + Math.random() * 7;
+    blood.push({ x: sx, y: sy, dx: Math.cos(a) * sp, dy: Math.sin(a) * sp, life: 45 });
+  }
+}
+
+function megaWallHit(b){
+  shake = Math.max(shake, MEGA_BOUNCE_SHAKE);
+  playSound("https://file.garden/Zfwe_2Ig9weivlFh/cannon_wallhit.wav");
+  for (let k = 0; k < 14; k++) {
+    blood.push({ x: b.x, y: b.y, dx: (Math.random() - 0.5) * 6, dy: (Math.random() - 0.5) * 6, life: 25 });
+  }
+}
+
+// kills everything the big bullet is touching
+function megaKill(b){
+  const R = MEGA_HIT_R;
+  const ang = Math.atan2(b.dy, b.dx);
+  let any = false;
+
+  // normal enemies
+  for (let ei = enemies.length - 1; ei >= 0; ei--) {
+    const e = enemies[ei];
+    if (e.invulnerable || Math.hypot(e.x - b.x, e.y - b.y) >= R) continue;
+    if (isMultiplayerClient && e.id !== undefined) {
+      pendingLocalRemovals.enemies.add(e.id);
+      socket.emit("killEnemy", { id: e.id });
+    }
+    if (e.fromTree) {
+      if (e.aliveSound) e.aliveSound.pause();
+      playSound("https://file.garden/Zfwe_2Ig9weivlFh/bloodtree_Creaturedeath.mp3");
+    }
+    enemies.splice(ei, 1);
+    kills++; any = true;
+    if (tree && tree.state === "alive") { tree.bar = 1; triggerTreeBarUp(); }
+    killPop = 1.4; killPopColor = 1.2;
+    spawnNewBlood(e.x, e.y, ang);
+    if (!newblood) for (let k = 0; k < 6; k++) blood.push({ x: e.x, y: e.y, dx: (Math.random() - 0.5) * 2, dy: (Math.random() - 0.5) * 2, life: 40 });
+  }
+
+  // shooter enemies + gugerbird
+  for (let bi = bossEnemies.length - 1; bi >= 0; bi--) {
+    const be = bossEnemies[bi];
+    if (Math.hypot(be.x - b.x, be.y - b.y) >= R + (be.gug ? 10 : 0)) continue;
+    if (isMultiplayerClient && be.id !== undefined) {
+      mpKilledBosses.add(be.id);
+      socket.emit("killEnemy", { id: be.id });
+    }
+    bossEnemies.splice(bi, 1);
+    kills++; any = true;
+    if (tree && tree.state === "alive") { tree.bar = 1; triggerTreeBarUp(); }
+    killPop = 1.4; killPopColor = 1.2;
+    spawnNewBlood(be.x, be.y, ang);
+    if (!newblood) for (let k = 0; k < 6; k++) blood.push({ x: be.x, y: be.y, dx: (Math.random() - 0.5) * 2, dy: (Math.random() - 0.5) * 2, life: 40 });
+  }
+
+  // worms: touching the head or any part of the body kills the whole worm
+  for (let wi = worms.length - 1; wi >= 0; wi--) {
+    const w = worms[wi];
+    let touched = Math.hypot(w.x - b.x, w.y - b.y) < R + 14;
+    if (!touched && w.history) {
+      for (let s = 1; s <= w.segments && !touched; s++) {
+        const hp = w.history[s * w.segmentSpacing];
+        if (hp && Math.hypot(hp.x - b.x, hp.y - b.y) < R) touched = true;
+      }
+    }
+    if (!touched) continue;
+    if (isMultiplayerClient) {
+      if (w.id !== undefined && socket) {
+        socket.emit("wormHit", { id: w.id, damageSegments: 9999 });
+        pendingLocalRemovals.worms.add(w.id);
+      }
+    } else {
+      const drops = Math.min(8, w.segments);
+      for (let s = 0; s < drops; s++) {
+        pickups.push({ id: nextItemId++, x: w.x + (Math.random() - 0.5) * 40, y: w.y + (Math.random() - 0.5) * 40 });
+      }
+      if (Math.random() < 0.4) gunPickups.push({ id: nextItemId++, x: w.x, y: w.y, gunKey: "rocketLauncher", glyph: GUNS["rocketLauncher"].glyph, bob: 0 });
+    }
+    worms.splice(wi, 1);
+    kills++; any = true;
+    if (tree && tree.state === "alive") { tree.bar = 1; triggerTreeBarUp(); }
+    killPop = 1.4; killPopColor = 1.2;
+    for (let p = 0; p < 12; p++) blood.push({ x: w.x, y: w.y, dx: (Math.random() - 0.5) * 3, dy: (Math.random() - 0.5) * 3, life: 40 });
+    playSound("https://file.garden/Zfwe_2Ig9weivlFh/worm_dying2.wav");
+  }
+
+  // enemy bullets just disappear
+  for (let k = bullets.length - 1; k >= 0; k--) {
+    const eb = bullets[k];
+    if (!eb.enemyBullet || Math.hypot(eb.x - b.x, eb.y - b.y) >= R) continue;
+    if (eb.nid !== undefined) mpEnemyBulletsHit.add(eb.nid);
+    bullets.splice(k, 1);
+  }
+
+  // the Player-mode bot dies too
+  if (playerActive() && PB.alive) {
+    const pc = pbCenter();
+    if (Math.hypot(pc.x - b.x, pc.y - b.y) < R + 12) pbHurt(9999, ang);
+  }
+
+  // waves boss: takes 10% of its health each time the bullet passes through it
+  if (b.bossCd > 0) b.bossCd--;
+  if (boss.active && boss.state === "fight" && b.bossCd <= 0 && Math.hypot(boss.x - b.x, boss.y - b.y) < BOSS_HIT_R + R) {
+    b.bossCd = 40;
+    bossDamage(Math.round(boss.maxHp * 0.1), b.x, b.y);
+  }
+
+  if (any) {
+    playSound("https://file.garden/Zfwe_2Ig9weivlFh/bird%20death.wav");
+    mpBroadcastFast();
+  }
+}
+
+// runs every game tick
+function megaUpdate(){
+  if (!player) return;
+  if (!player.shootingHeld) player.megaLock = false;
+
+  // ---- charging: gun pulls back + shakes, screen fades to white ----
+  if (mega.phase === 1) {
+    if (!player.alive || player.currentGunKey !== "megacannon") {
+      megaCancel();
+    } else {
+      mega.t += STEP_MS;
+      const p = Math.min(1, mega.t / MEGA_CHARGE_MS);
+      player.megaProg = p;
+      player.megaBack = p * MEGA_PULLBACK;
+      mega.white = p;
+      if (mega.t >= MEGA_CHARGE_MS) megaShoot();
+    }
+  }
+
+  // ---- the big bullets ----
+  for (let i = megaBullets.length - 1; i >= 0; i--) {
+    const b = megaBullets[i];
+    if (timeStopLeftMs > 0 && timeStopMine) continue;   // frozen by your own time stop
+
+    b.x += b.dx;
+    b.y += b.dy;
+    b.trail.push({ x: b.x, y: b.y });
+    if (b.trail.length > 10) b.trail.shift();
+
+    const B = b.bnd;
+    if (b.bouncesLeft > 0) {
+      const pad = MEGA_BOUNCE_PAD;
+      let hit = false;
+      if (b.x <= B.l + pad) { b.x = B.l + pad; b.dx = Math.abs(b.dx); hit = true; }
+      else if (b.x >= B.r - pad) { b.x = B.r - pad; b.dx = -Math.abs(b.dx); hit = true; }
+      if (b.y <= B.t + pad) { b.y = B.t + pad; b.dy = Math.abs(b.dy); hit = true; }
+      else if (b.y >= B.b - pad) { b.y = B.b - pad; b.dy = -Math.abs(b.dy); hit = true; }
+      if (hit) { b.bouncesLeft--; megaWallHit(b); }
+    } else if (b.x < B.l - 200 || b.x > B.r + 200 || b.y < B.t - 200 || b.y > B.b + 200) {
+      megaBullets.splice(i, 1);    // out of bounces and off the screen: gone
+      continue;
+    }
+
+    megaKill(b);
+  }
+}
+
+function megaDrawBullets(){
+  if (!megaBullets.length) return;
+  ctx.save();
+  ctx.font = MEGA_BULLET_SIZE + "px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = lightMode ? "black" : "white";
+  megaBullets.forEach(b => {
+    const ang = Math.atan2(b.dy, b.dx);
+    b.trail.forEach((t, i) => {
+      ctx.save();
+      ctx.globalAlpha = (i + 1) / b.trail.length * 0.22;
+      ctx.translate(t.x, t.y);
+      ctx.rotate(ang);
+      ctx.fillText(MEGA_BULLET_GLYPH, 0, 0);
+      ctx.restore();
+    });
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(ang);
+    ctx.fillText(MEGA_BULLET_GLYPH, 0, 0);
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+// flashing "QUICKLY SHOOT" text while you are holding the Mega Cannon (same font + spot as the NEW HIGH SCORE text)
+function megaDrawQuickShoot(){
+  if (gameState !== "playing" || !player || !player.alive) return;
+  if (player.currentGunKey !== "megacannon") return;
+  if (Math.floor(performance.now() / 250) % 2 === 1) return;   // blink on/off every quarter second
+
+  ctx.save();
+  ctx.font = "28px 'Times New Roman', Times, serif";   // not bold
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "white";
+  ctx.fillText("QUICKLY SHOOT", canvas.width / 2, canvas.height / 2 - 120);
+  ctx.restore();
+}
+
+// the white screen fade while charging
+function megaDrawWhite(){
+  if (!(mega.white > 0) || gameState !== "playing") return;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, mega.white);
+  ctx.fillStyle = "white";
+  ctx.fillRect(-100, -100, canvas.width + 200, canvas.height + 200);
+  ctx.restore();
+}
+
 // ====== UPDATE ======
 function update(time){
     mpFrameT = performance.now();
@@ -7519,6 +7911,7 @@ function update(time){
    if (mpClientMenuOpen && mpIsJoinedClient()) { keys = {}; mouseDown = false; if(player) player.shootingHeld = false; }  // menu open: you stand still
    updateMagnet();
    tsTick();
+   megaUpdate();
    hostCheckPickupCollisions();
    Object.values(remotePlayers).forEach(rp=>{
      if(rp.displayX===undefined) rp.displayX = rp.x;
@@ -7818,6 +8211,7 @@ else if(player.alive && player.shootingHeld){
         case "turret": fireTurret(now); break;
         case "railgun": chargeRailgun(now); break;
         case "blackhole": fireBlackHole(now); break;
+        case "megacannon": fireMegaCannon(now); break;
 
         default:       break;
     }
@@ -8154,7 +8548,7 @@ if (Math.abs(diff) < 0.1 && t.cooldown <= 0) {
       }
       if (hit) {
         if(b.nid !== undefined) mpEnemyBulletsHit.add(b.nid);
-        damagePlayer(b.dmg !== undefined ? b.dmg : (instakillEnabled ? player.health : 8));
+        damagePlayer((b.dmg !== undefined ? b.dmg : 16) * 1.25);
         for (let k = 0; k < 8; k++){
           blood.push({
             x: b.x,
@@ -8307,7 +8701,7 @@ if (player.currentGunKey === "sword") {
         b.hitEnemies.push(e);
 
         if (e.maxHealth === undefined) { e.maxHealth = ENEMY_MAX_HEALTH; e.health = ENEMY_MAX_HEALTH; }
-        const mpDealt = (instakillEnabled || b.isRocket) ? e.health : (b.damage || 10);
+        const mpDealt = (instakillEnabled || b.isRocket) ? e.health : (b.damage || 10) * (difficulty === "Hard" ? 1.25 : 1);
         e.health -= mpDealt;
         if(isMultiplayerClient && e.id !== undefined && !instakillEnabled && !b.isRocket){
           mpEnemyDamage[e.id] = (mpEnemyDamage[e.id] || 0) + mpDealt;
@@ -9157,7 +9551,7 @@ if (worms.length > 0 && !isMultiplayerClient && !tsEnemiesFrozen()) {
             trail:[],
             enemyBullet:true,
             nid: nextItemId++,
-            dmg: wavesMode ? 13 : undefined,
+            dmg: 16,
             glyph: cardBullets[Math.floor(Math.random()*cardBullets.length)]
           });
         }
@@ -9169,7 +9563,7 @@ if (worms.length > 0 && !isMultiplayerClient && !tsEnemiesFrozen()) {
           trail:[],
           enemyBullet:true,
           nid: nextItemId++,
-          dmg: wavesMode ? 13 : undefined,
+          dmg: 16,
           glyph:glyph
         });
       }
@@ -9268,6 +9662,7 @@ bricks.forEach((b, bi) => {
         ensureInInventory(g.gunKey);
       }
       if(performance.now() > magnetNoSwitchUntil) player.currentGunKey = g.gunKey;
+      if (GUNS[g.gunKey]) spawnFloatText(GUNS[g.gunKey].name, g.x, g.y - 12, "yellow");
       gunPickups.splice(gi,1);
       playSound("https://file.garden/Zfwe_2Ig9weivlFh/pickup.wav");
       if(isMultiplayerClient && g.id !== undefined){
@@ -11212,9 +11607,9 @@ if (previewTurret) {
 
   ctx.globalAlpha = 0.8;
   ctx.fillStyle =
-    previewTurret.affordable ? "white" : "red";
+    previewTurret.affordable ? (playerColorValue() || (lightMode ? "black" : "white")) : "red";
   ctx.strokeStyle =
-    previewTurret.affordable ? "white" : "red";
+    previewTurret.affordable ? (playerColorValue() || (lightMode ? "black" : "white")) : "red";
 
   ctx.font = "14px monospace";
   ctx.textAlign = "center";
@@ -11363,7 +11758,11 @@ else {
     let angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
     ctx.save();
     ctx.translate(player.x, player.y);
-    const back = (player.recoilBack || 0) + (player.railChargeBack || 0);
+    const back = (player.recoilBack || 0) + (player.railChargeBack || 0) + (player.megaBack || 0);
+    if ((player.megaProg || 0) > 0) {
+      const megaShk = player.megaProg * player.megaProg * 5 + player.megaProg * 0.8;
+      ctx.translate((Math.random() - 0.5) * megaShk, (Math.random() - 0.5) * megaShk);
+    }
     ctx.translate(-Math.cos(angle) * back, -Math.sin(angle) * back);
     if ((player.gravityFill || 0) > 0) {
       const gShake = player.gravityFill * player.gravityFill * 4 + player.gravityFill * 0.6;   // barely moves when nearly empty, rattles when full
@@ -11379,10 +11778,10 @@ else {
         const glyph = getGunGlyphForPlayerDirection(player.currentGunKey);
         ctx.save();
         ctx.globalAlpha = 0.15;
-        ctx.fillText(glyph, 17, 7);
+        if (!(heldGun && heldGun.art)) ctx.fillText(glyph, 17, 7);
         ctx.globalAlpha = 1;
         ctx.restore();
-        ctx.fillText(glyph, 15, 5);
+        if (heldGun && heldGun.art) megaDrawArt(15, 5); else ctx.fillText(glyph, 15, 5);
       }
     }
     ctx.restore();
@@ -11453,6 +11852,8 @@ else {
       ctx.restore();
     });
 
+    megaDrawBullets();
+
     // Black Hole Shotgun beam flash
     blackHoleBeams.forEach(beam=>{
       const t = beam.life / beam.maxLife;
@@ -11491,7 +11892,7 @@ else {
 ctx.save();
 ctx.font = "14px monospace";
 ctx.textAlign = "center";
-if (colorMode) ctx.fillStyle = COLOR_MODE_COLORS.turret;
+ctx.fillStyle = playerColorValue() || (lightMode ? "black" : "white");
 
 activeTurrets.forEach(t => {
   // base
@@ -11550,6 +11951,14 @@ gunPickups.forEach(g=>{
   ctx.translate(g.x, g.y + yo);
 
   if (g.rotation) ctx.rotate(g.rotation); // ✅ apply rotation
+
+  // Mega Cannon flag pickup: bigger + pulsing glow
+  if (g.gunKey === "megacannon") {
+    const megaPulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.006);
+    ctx.scale(1.5, 1.5);
+    ctx.shadowColor = "rgba(255, 200, 60, 0.6)";
+    ctx.shadowBlur = 5 + megaPulse * 8;
+  }
 
   if (colorMode) ctx.fillStyle = gunColorFor(g.gunKey);
   ctx.fillText(g.glyph, 0, 0);
@@ -11847,6 +12256,8 @@ drawInventory();
 drawMiniMap();
 drawWavesHUD();
 tsDrawCountdown();
+megaDrawWhite();
+megaDrawQuickShoot();
 if (window.nukeFlashA > 0) {
   ctx.save();
   ctx.fillStyle = `rgba(255,255,255,${window.nukeFlashA})`;
