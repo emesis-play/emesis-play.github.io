@@ -377,6 +377,7 @@ let timeStopLeftMs = 0;     // > 0 while time is stopped (counts down)
 let timeStopMine = false;   // true when YOU used it (your bullets freeze in mid-air)
 let tsShakeLeftMs = 0;      // screen shake at the start
 let tsLastTick = 0;
+let tsOwnerId = null;       // multiplayer: id of the player who stopped time (null = nobody / single player)
 let tsMusicRate = 1;      // current music speed (1 = normal)
 let spawnDelay, minSpawnDelay, spawnAccel, lastSpawn;
 let kills, ammoUsed, startTime, endTime;
@@ -398,6 +399,9 @@ let selectedGameMode = 0;
 let gameSettingsOptions = ["Difficulty", "Instakill", "Inf Ammo", "Start Game", "Back"];
 let selectedSettingsOption = 0;
 let openWorldMode = false;
+let owGugFirstSecs = null;           // when the first gugerbird showed up this run (null = none yet)
+let owBossSpawned = false;           // the open world boss only comes once per run
+const OW_BOSS_DELAY_SECS = 120;      // boss comes this many seconds after the first gugerbird
 let followCameraMode = false;
 const FOLLOW_CAMERA_ZOOM = 1;
 
@@ -2220,6 +2224,7 @@ function mpConnect(){
       }
     });
 
+    inE.forEach(ne => mpGravFx(prevEnemiesById[ne.id], ne));
     enemies = inE.map(ne => {
       const prev = prevEnemiesById[ne.id];
       const full = ne.ik !== undefined;   // slim packets leave out the fields that never change
@@ -2241,6 +2246,7 @@ function mpConnect(){
     const inB = inBRaw.filter(b => !mpKilledBosses.has(b.id));
     const prevBossById = {};
     bossEnemies.forEach(e => { if(e.id !== undefined) prevBossById[e.id] = e; });
+    inB.forEach(nb => mpGravFx(prevBossById[nb.id], nb));
     bossEnemies = inB.map(ne0 => {
       const ne = { ...ne0, health: ne0.health - (mpBossDamage[ne0.id] || 0) };
       const prev = ne.id !== undefined ? prevBossById[ne.id] : undefined;
@@ -2405,6 +2411,7 @@ function mpConnect(){
     if(bossIdx !== -1){
       const be = bossEnemies[bossIdx];
       bossEnemies.splice(bossIdx, 1);
+      if (be.gug) gugRollDrop(be);
       if (tree && tree.state === "alive") { tree.bar = 1; triggerTreeBarUp(); }
       killPop = 1;
       killPopColor = 1;
@@ -2572,10 +2579,12 @@ function mpConnect(){
     if(data.rv !== undefined){ if(socket && data.rv === socket.id && mpDowned) mpReviveSelf(); return; }
     if(data.hurt){ mpRemoteBlood(data.x, data.y); return; }
     if(data.nblood){ spawnNewBlood(data.x, data.y, data.a || 0, true); return; }
-    if(data.gvb){ gravitySpawnBurst(Number(data.x), Number(data.y), Number(data.a), true); return; }
+    if(data.gvb){ gravitySpawnBurst(Number(data.x), Number(data.y), Number(data.a), true); gravPlayOnce(GRAV_SHOOT_SND); return; }
+    if(data.bst){ basterRemoteSpawn(data); return; }
     if(data.timestop){ mpRemoteTimeStop(data); return; }
     if(data.nuke){ mpRemoteNukeVisual(data); return; }
     if(data.rboom){ mpRemoteRocketBoom(data); return; }
+    const rbBefore = remoteBullets.length;
     if(data.mg){
       // machine gun bullet that bounces off the screen edges
       remoteBullets.push({ x: data.x, y: data.y, dx: data.dx, dy: data.dy, trail: [], life: 90, bouncesLeft: 3 });
@@ -2613,6 +2622,8 @@ function mpConnect(){
         life: 90
       });
     }
+
+    for(let rbk = rbBefore; rbk < remoteBullets.length; rbk++) remoteBullets[rbk].owner = data.id;
 
     if(data.id !== undefined && remotePlayers[data.id]){
       const rp = remotePlayers[data.id];
@@ -2696,7 +2707,7 @@ function mpBuildFast(){
   return {
     t: mpFrameT,
     enemies: enemies.map(e=>{
-      const o = { id:e.id, x:mpR(e.x), y:mpR(e.y), health:e.health };
+      const o = { id:e.id, x:mpR(e.x), y:mpR(e.y), health:e.health, fl: e.fleeing ? 1 : undefined };
       if(e.gravity){ o.gravity = e.gravity; o.gOwner = e.gOwner; if(e.gravity === "fly"){ o.gvx = mpR(e.gvx); o.gvy = mpR(e.gvy); } }
       e._mpN = (e._mpN || 0) + 1;
       // the fields that never change are only sent for new enemies and then once every ~0.5s
@@ -3244,7 +3255,7 @@ function handleConsoleCommand(cmd) {
     if (mpCheatsAllowed()) jessMode();
     return;
 }
-if (cmd.trim() === "/skipwaves") {
+if (cmd.trim().toLowerCase() === "/skipwaves" || cmd.trim().toLowerCase() === "/skipwave") {
         window.lastConsoleCommand = null;   // so pressing Enter again doesn't re-run it
         if (mpCheatsAllowed()) wavesSkipToBoss();
         return;
@@ -4020,6 +4031,18 @@ blackhole: {
 },
 
 };
+//▄̪︻═͠☞
+GUNS.Magic_blaster = {
+  name: "Magic Blaster",
+  glyph: "♰",
+  fireRateMs: 400,        // time between shots (a full shot lasts about 1.7s)
+  bulletSpeed: 0,
+  consumePerShot: 10,       // ammo used per shot
+  type: "single",
+  recoilStrength: 4,
+  recoilBack: 3,
+  recoilRecovery: 0.9
+};
 
 GUNS.megacannon = {
   name: "Mega Cannon",
@@ -4183,7 +4206,7 @@ function resetGame(){
   mpMagnetPulling = false;
 
   // reset screen effects
-  shake = 0; invertTimer = 0; timeStopLeftMs = 0; timeStopMine = false; tsShakeLeftMs = 0; tsMusicRate = 1; try { bgMusic.playbackRate = 1; } catch(e) {} megaReset();
+  shake = 0; invertTimer = 0; timeStopLeftMs = 0; timeStopMine = false; tsOwnerId = null; tsShakeLeftMs = 0; tsMusicRate = 1; try { bgMusic.playbackRate = 1; } catch(e) {} megaReset(); basterReset();
   shakeX = 0; shakeY = 0; shakeTime = 0; flashAlpha = 0;
   hsFlashStart = 0; hsFlashDone = false;
 
@@ -4817,7 +4840,15 @@ function spawnPickup(){
 }
 
 // spawn ammo every 5 seconds (existing behavior)
-setInterval(()=>{ if(gameState==="playing" && !tutorialActive && !isMultiplayerClient && !(wavesMode && Math.random() < 0.6)) spawnPickup(); },5000);
+// Openworld gets a little extra ammo: 1 = normal, 1.3 = ~30% more, 2 = double
+const OPEN_WORLD_AMMO_BOOST = 1.3;
+setInterval(()=>{
+  if(gameState==="playing" && !tutorialActive && !isMultiplayerClient && !(wavesMode && Math.random() < 0.6)){
+    spawnPickup();
+    // open world: sometimes spawn a bonus pickup on top of the normal one
+    if(openWorldMode && Math.random() < OPEN_WORLD_AMMO_BOOST - 1) spawnPickup();
+  }
+},5000);
 
 
 function distanceToLine(px, py, x1, y1, x2, y2) {
@@ -4870,7 +4901,7 @@ gy = position.y;
 }
 
 function spawnWorm() {
-  if(playerActive()) return;
+  if(playerActive() || boss.active) return;
     if (worms.length > 0) return;
 
     const speed = 1.5;
@@ -5514,7 +5545,7 @@ function tsTick(){
       tsShakeLeftMs -= dtT;
       shake = Math.max(shake, 40);   // shakes the whole screen (follows your camera-shake setting)
     }
-    if (timeStopLeftMs <= 0) { timeStopLeftMs = 0; if (timeStopMine) tsInvertPulse(); timeStopMine = false; tsReleaseBullets(); }
+    if (timeStopLeftMs <= 0) { timeStopLeftMs = 0; tsInvertPulse(); timeStopMine = false; tsOwnerId = null; tsReleaseBullets(); }
   }
 }
 
@@ -5585,6 +5616,7 @@ function startTimeStop(){
   }
   timeStopLeftMs = TIMESTOP_SECONDS * 1000;
   timeStopMine = true;
+  tsOwnerId = (socket && socket.id) ? socket.id : null;
   tsShakeLeftMs = 1000;
   tsLastTick = performance.now();
   tsInvertPulse();
@@ -5598,11 +5630,24 @@ function startTimeStop(){
 
 // SOMEONE ELSE used it: the enemies freeze, you do NOT (no invert, your bullets keep flying)
 function mpRemoteTimeStop(data){
+  if (timeStopLeftMs > 0) return;          // time is already stopped
   timeStopLeftMs = TIMESTOP_SECONDS * 1000;
   timeStopMine = false;
-  tsShakeLeftMs = 400;
+  tsOwnerId = data.id;                     // THEIR bullets will hang in mid-air on your screen
+  tsShakeLeftMs = 1000;
   tsLastTick = performance.now();
-  tsPlaySound();
+  // the flying clock glyph, coming from the player who used it
+  try {
+    const cam = getCameraState();
+    tsFlyFx.push({
+      sx: Number(data.x) * cam.zoom + cam.x,
+      sy: Number(data.y) * cam.zoom + cam.y,
+      t0: performance.now()
+    });
+  } catch (e) {}
+  tsInvertPulse();                         // the invert effect, same as the player who used it
+  tsPlaySound();                           // the time stop sound (the music slows down by itself)
+  shake = 60;
 }
 
 function fireTimeStop(now){
@@ -6416,6 +6461,28 @@ function gravitySpawnBurst(x, y, aim, fromRemote){
   }
 }
 
+// joiners: spot grabs and wall bounces in the host's enemy packets and play the same sounds/sparks the host sees
+function mpGravFx(prev, ne){
+  if(!prev || !ne) return;
+  const nowF = performance.now();
+  // somebody ELSE just grabbed it (my own grab sound is already handled)
+  if(ne.gravity === "held" && prev.gravity !== "held" && !(socket && ne.gOwner === socket.id)){
+    if(!window.gravGrabSndAt || nowF - window.gravGrabSndAt > 120){ window.gravGrabSndAt = nowF; gravPlayOnce(GRAV_GRAB_SND); }
+  }
+  // it bounced off a wall (its direction flipped)
+  if(ne.gravity === "fly" && prev.gravity === "fly" && prev.gvx !== undefined && ne.gvx !== undefined &&
+     (Math.sign(prev.gvx) !== Math.sign(ne.gvx) || Math.sign(prev.gvy) !== Math.sign(ne.gvy))){
+    for(let k = 0; k < 6; k++){
+      blood.push({ x: ne.x, y: ne.y, dx: (Math.random() - 0.5) * 3, dy: (Math.random() - 0.5) * 3, life: 20 });
+    }
+    shake = Math.max(shake, 10);
+    if(!window.gravHitSoundLast || nowF - window.gravHitSoundLast > 80){
+      window.gravHitSoundLast = nowF;
+      gravPlayOnce(GRAV_WALL_SND);
+    }
+  }
+}
+
 function mpSendGravity(hold, launch, aim){
   if(socket && mpPartyCode){
     socket.emit("collectItem", { type: "gravity", pid: socket.id, hold: hold ? 1 : 0, launch: launch ? 1 : 0, aim: Math.round(aim * 1000) / 1000 });
@@ -6440,6 +6507,7 @@ function gravityTick(u, all, g){
       if(Math.abs(coneDiff) > g.coneDeg * Math.PI / 180) return;
       e.gravity = "held";
       e.gOwner = u.id;
+      if(u.id !== mpMyGravId() && (!window.gravGrabSndAt || performance.now() - window.gravGrabSndAt > 120)){ window.gravGrabSndAt = performance.now(); gravPlayOnce(GRAV_GRAB_SND); }
       e.gOffA = Math.random() * Math.PI * 2;
       e.gOffR = Math.random() * 22;
       held.push(e);
@@ -6752,6 +6820,14 @@ function drawGravityGun(){
   });
   const liveKeys = new Set(rings.map(r => r.key));
   Object.keys(window.gravRingP).forEach(k => { if(!liveKeys.has(k)) delete window.gravRingP[k]; });
+
+  // the pull hum of the OTHER players' gravity guns (quieter than yours)
+  {
+    const remPulling = rings.some(r => r.key !== "me") && gameState === "playing";
+    if(!window.gravRemHum){ window.gravRemHum = new Audio(GRAV_HOLD_SND); window.gravRemHum.loop = true; window.gravRemHum.volume = GRAV_VOLUME * 0.6; }
+    if(remPulling){ if(window.gravRemHum.paused) window.gravRemHum.play().catch(() => {}); }
+    else if(!window.gravRemHum.paused){ window.gravRemHum.pause(); try { window.gravRemHum.currentTime = 0; } catch(e) {} }
+  }
 
   ctx.font = "14px sans-serif";
   ctx.textAlign = "center";
@@ -7874,6 +7950,477 @@ function megaDrawWhite(){
   ctx.restore();
 }
 
+// ============================================================
+//  MAGIC BLASTER  (weapon "Magic_blaster", held glyph "e")
+//  Every shot calls up 2 basters from behind you, one on each
+//  side of you (relative to where you are looking). They fly in,
+//  charge, then fire a beam at your aim and fly away again.
+// ============================================================
+const BASTER_GLYPH       = "۞ࣼࣼࣼࣼ​ᙥࣸࣸࣸ࣡࣡ ꙱⁐​​";   // skull and crossbones (change this to change the look)
+const BASTER_SIZE        = 19;     // size of the skull
+const BASTER_SIDE_GAP    = 70;     // how far out to each side of you they park
+const BASTER_BACK_GAP    = 35;     // how far behind you they park
+const BASTER_SPAWN_BACK  = 260;    // how far behind their parking spot they start
+const BASTER_LEAVE_DIST  = 300;    // how far back they fly when they leave
+const BASTER_ARRIVE_MS   = 320;    // fly-in time
+const BASTER_CHARGE_MS   = 420;    // charge time before the beam
+const BASTER_FIRE_MS     = 650;    // how long the beam stays on
+const BASTER_LEAVE_MS    = 350;    // fly-away time
+const BASTER_BEAM_WIDTH  = 19;     // beam thickness at its fattest
+const BASTER_BEAM_LEN    = 3000;   // how far the beam reaches
+const BASTER_SHOOT_SHAKE = 28;     // screen shake when the beam fires
+const BASTER_HOLD_SHAKE  = 10;     // screen shake while the beam is on
+const BASTER_BOSS_PCT    = 0.04;   // waves boss loses this much of its max health per hit
+const BASTER_BOSS_CD     = 12;     // ticks between hits on the waves boss
+
+var basters = [];
+
+function basterReset(){
+  if (basters) basters.length = 0;
+  if (basterParts) basterParts.length = 0;
+  if (gugSeen) gugSeen.length = 0;
+}
+
+// you pressed shoot: call up one baster on each side of you
+function fireMagic_blaster(now){
+  const g = GUNS.Magic_blaster;
+  if (!canFireNow(now, g)) return;
+  if (!consumeAmmo(g.consumePerShot)) return;
+
+  const aim = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  const fx = Math.cos(aim), fy = Math.sin(aim);   // the way you are looking
+  const sx = -fy,           sy = fx;              // sideways from that
+
+  const bstSide = Math.random() < 0.5 ? -1 : 1;
+  [bstSide].forEach(side => {
+    basters.push({
+      side: side,
+      t: 0,
+      fx: fx, fy: fy,
+      // parking spot, relative to you (so they follow you if you move)
+      ox: -fx * BASTER_BACK_GAP + sx * BASTER_SIDE_GAP * side,
+      oy: -fy * BASTER_BACK_GAP + sy * BASTER_SIDE_GAP * side,
+      x: player.x, y: player.y,
+      ang: aim,
+      fired: false,
+      w: 0, alpha: 1, scale: 0.2,
+      mx: player.x, my: player.y, ex: player.x, ey: player.y,
+      bossCd: 0
+    });
+  });
+
+  player.lastShotTime = now;
+  shootKick(g);
+  playSound("https://file.garden/Zfwe_2Ig9weivlFh/cannon_pullback.wav");
+  if (socket && mpPartyCode) socket.emit("bulletFired", { id: socket.id, x: mpR(player.x), y: mpR(player.y), dx: 0, dy: 0, bst: 1, a: Math.round(aim * 1000) / 1000, sd: bstSide });
+}
+
+// another player shot the Magic Blaster: their baster shows up on my screen (visual only, THEIR game does the killing)
+function basterRemoteSpawn(data){
+  const rp = remotePlayers[data.id];
+  const px = rp ? (rp.displayX !== undefined ? rp.displayX : rp.x) : Number(data.x);
+  const py = rp ? (rp.displayY !== undefined ? rp.displayY : rp.y) : Number(data.y);
+  const aim = Number(data.a);
+  if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(aim)) return;
+  if (basters.length > 40) return;
+  const side = (data.sd === -1) ? -1 : 1;
+  const fx = Math.cos(aim), fy = Math.sin(aim);
+  const sx = -fy,           sy = fx;
+  basters.push({
+    owner: data.id, opx: px, opy: py, oaim: aim,
+    side: side,
+    t: 0,
+    fx: fx, fy: fy,
+    ox: -fx * BASTER_BACK_GAP + sx * BASTER_SIDE_GAP * side,
+    oy: -fy * BASTER_BACK_GAP + sy * BASTER_SIDE_GAP * side,
+    x: px, y: py,
+    ang: aim,
+    fired: false,
+    w: 0, alpha: 1, scale: 0.2,
+    mx: px, my: py, ex: px, ey: py,
+    bossCd: 0
+  });
+  playSound("https://file.garden/Zfwe_2Ig9weivlFh/cannon_pullback.wav");
+}
+
+// shortest distance from a point to a line segment
+function basterSegDist(px, py, ax, ay, bx, by){
+  const abx = bx - ax, aby = by - ay;
+  const l2 = abx * abx + aby * aby || 1;
+  let t = ((px - ax) * abx + (py - ay) * aby) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + abx * t), py - (ay + aby * t));
+}
+
+// kills everything the beam is touching
+function basterKill(b){
+  const R = b.w / 2 + 8;
+  const ang = b.ang;
+  let any = false;
+  const d = (x, y) => basterSegDist(x, y, b.mx, b.my, b.ex, b.ey);
+
+  // normal enemies
+  for (let ei = enemies.length - 1; ei >= 0; ei--) {
+    const e = enemies[ei];
+    if (e.invulnerable || d(e.x, e.y) >= R) continue;
+    if (isMultiplayerClient && e.id !== undefined) {
+      pendingLocalRemovals.enemies.add(e.id);
+      socket.emit("killEnemy", { id: e.id });
+    }
+    if (e.fromTree) {
+      if (e.aliveSound) e.aliveSound.pause();
+      playSound("https://file.garden/Zfwe_2Ig9weivlFh/bloodtree_Creaturedeath.mp3");
+    }
+    enemies.splice(ei, 1);
+    kills++; any = true;
+    if (tree && tree.state === "alive") { tree.bar = 1; triggerTreeBarUp(); }
+    killPop = 1.4; killPopColor = 1.2;
+    spawnNewBlood(e.x, e.y, ang);
+    if (!newblood) for (let k = 0; k < 6; k++) blood.push({ x: e.x, y: e.y, dx: (Math.random() - 0.5) * 2, dy: (Math.random() - 0.5) * 2, life: 40 });
+  }
+
+  // shooter enemies + gugerbird
+  for (let bi = bossEnemies.length - 1; bi >= 0; bi--) {
+    const be = bossEnemies[bi];
+    if (d(be.x, be.y) >= R + (be.gug ? 10 : 0)) continue;
+    if (isMultiplayerClient && be.id !== undefined) {
+      mpKilledBosses.add(be.id);
+      socket.emit("killEnemy", { id: be.id });
+    }
+    bossEnemies.splice(bi, 1);
+    kills++; any = true;
+    if (tree && tree.state === "alive") { tree.bar = 1; triggerTreeBarUp(); }
+    killPop = 1.4; killPopColor = 1.2;
+    spawnNewBlood(be.x, be.y, ang);
+    if (!newblood) for (let k = 0; k < 6; k++) blood.push({ x: be.x, y: be.y, dx: (Math.random() - 0.5) * 2, dy: (Math.random() - 0.5) * 2, life: 40 });
+  }
+
+  // worms: touching the head or any part of the body kills the whole worm
+  for (let wi = worms.length - 1; wi >= 0; wi--) {
+    const w = worms[wi];
+    let touched = d(w.x, w.y) < R + 14;
+    if (!touched && w.history) {
+      for (let s = 1; s <= w.segments && !touched; s++) {
+        const hp = w.history[s * w.segmentSpacing];
+        if (hp && d(hp.x, hp.y) < R) touched = true;
+      }
+    }
+    if (!touched) continue;
+    if (isMultiplayerClient) {
+      if (w.id !== undefined && socket) {
+        socket.emit("wormHit", { id: w.id, damageSegments: 9999 });
+        pendingLocalRemovals.worms.add(w.id);
+      }
+    } else {
+      const drops = Math.min(8, w.segments);
+      for (let s = 0; s < drops; s++) {
+        pickups.push({ id: nextItemId++, x: w.x + (Math.random() - 0.5) * 40, y: w.y + (Math.random() - 0.5) * 40 });
+      }
+      if (Math.random() < 0.4) gunPickups.push({ id: nextItemId++, x: w.x, y: w.y, gunKey: "rocketLauncher", glyph: GUNS["rocketLauncher"].glyph, bob: 0 });
+    }
+    worms.splice(wi, 1);
+    kills++; any = true;
+    if (tree && tree.state === "alive") { tree.bar = 1; triggerTreeBarUp(); }
+    killPop = 1.4; killPopColor = 1.2;
+    for (let p = 0; p < 12; p++) blood.push({ x: w.x, y: w.y, dx: (Math.random() - 0.5) * 3, dy: (Math.random() - 0.5) * 3, life: 40 });
+    playSound("https://file.garden/Zfwe_2Ig9weivlFh/worm_dying2.wav");
+  }
+
+  // enemy bullets just disappear
+  for (let k = bullets.length - 1; k >= 0; k--) {
+    const eb = bullets[k];
+    if (!eb.enemyBullet || d(eb.x, eb.y) >= R) continue;
+    if (eb.nid !== undefined) mpEnemyBulletsHit.add(eb.nid);
+    bullets.splice(k, 1);
+  }
+
+  // the Player-mode bot dies too
+  if (playerActive() && PB.alive) {
+    const pc = pbCenter();
+    if (d(pc.x, pc.y) < R + 12) pbHurt(9999, ang);
+  }
+
+  // waves boss: loses a slice of its health every few ticks while the beam is on it
+  if (b.bossCd > 0) b.bossCd--;
+  if (boss.active && boss.state === "fight" && b.bossCd <= 0 && d(boss.x, boss.y) < BOSS_HIT_R + R) {
+    b.bossCd = BASTER_BOSS_CD;
+    bossDamage(Math.round(boss.maxHp * BASTER_BOSS_PCT), boss.x, boss.y);
+  }
+
+  if (any) {
+    playSound("https://file.garden/Zfwe_2Ig9weivlFh/bird%20death.wav");
+    mpBroadcastFast();
+  }
+}
+
+// ====== MAGIC BLASTER DROP: 1 in 3 chance when a gugerbird dies ======
+const BASTER_DROP_CHANCE = 1 / 3;
+var gugSeen = [];       // every gugerbird we have seen alive
+var gugLastKills = 0;   // kill count at the last tick
+
+// rolls the 1 in 3 chance and drops the Magic Blaster where the gugerbird was
+function gugRollDrop(g){
+  const i = gugSeen.indexOf(g);
+  if (i !== -1) gugSeen.splice(i, 1);
+  if (Math.random() < BASTER_DROP_CHANCE) {
+    gunPickups.push({ id: nextItemId++, x: g.x, y: g.y, gunKey: "Magic_blaster", glyph: GUNS.Magic_blaster.glyph, bob: 0 });
+  }
+}
+
+// runs every game tick: spots when a gugerbird has died
+function gugDropWatch(){
+  if (isMultiplayerClient) return;                 // the host decides drops
+  const killedNow = kills > gugLastKills;          // a real kill happened since the last tick
+  gugLastKills = kills || 0;
+  for (let i = 0; i < bossEnemies.length; i++) {
+    if (bossEnemies[i].gug && gugSeen.indexOf(bossEnemies[i]) === -1) gugSeen.push(bossEnemies[i]);
+  }
+  for (let i = gugSeen.length - 1; i >= 0; i--) {
+    const g = gugSeen[i];
+    if (bossEnemies.indexOf(g) !== -1) continue;   // still alive
+    if (killedNow) gugRollDrop(g);                 // it died
+    else gugSeen.splice(i, 1);                     // it was wiped away (new round, boss start...), no drop
+  }
+}
+
+// ---- particles (same look as the gravity gun pull: * - + ^) ----
+var basterParts = [];
+const BASTER_PART_CHARS  = ["*", "-", "+", "^"];
+const BASTER_SUCK_RADIUS = 40;    // how far out the sucked-in particles start
+const BASTER_BURST_COUNT = 45;    // particles that shoot out when the beam fires
+const BASTER_PART_MAX    = 400;   // most particles on screen at once
+
+// a bunch of particles shoot out of the mouth when the beam fires
+function basterBurst(b){
+  for (let i = 0; i < BASTER_BURST_COUNT && basterParts.length < BASTER_PART_MAX; i++) {
+    const a = b.ang + (Math.random() - 0.5) * 0.9;
+    const sp = 3 + Math.random() * 9;
+    basterParts.push({
+      kind: 1, x: b.mx, y: b.my, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      ch: BASTER_PART_CHARS[Math.floor(Math.random() * BASTER_PART_CHARS.length)],
+      life: 30 + Math.floor(Math.random() * 30)
+    });
+  }
+}
+
+// particles keep streaming out along the beam while it is on
+function basterStream(b){
+  for (let i = 0; i < 2 && basterParts.length < BASTER_PART_MAX; i++) {
+    const a = b.ang + (Math.random() - 0.5) * 0.35;
+    const sp = 6 + Math.random() * 10;
+    basterParts.push({
+      kind: 1, x: b.mx, y: b.my, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      ch: BASTER_PART_CHARS[Math.floor(Math.random() * BASTER_PART_CHARS.length)],
+      life: 25 + Math.floor(Math.random() * 20)
+    });
+  }
+}
+
+function basterPartsUpdate(){
+  if (!basterParts.length) return;
+  if (timeStopLeftMs > 0 && timeStopMine) return;   // frozen by your own time stop
+  for (let i = basterParts.length - 1; i >= 0; i--) {
+    const p = basterParts[i];
+    p.life--;
+    if (p.kind === 0) {
+      // being sucked into the mouth
+      const b = p.b;
+      p.x += (b.mx - p.x) * 0.08;
+      p.y += (b.my - p.y) * 0.08;
+      if (p.life <= 0 || b.fired || Math.hypot(b.mx - p.x, b.my - p.y) < 4) { basterParts.splice(i, 1); continue; }
+    } else {
+      // shot out of the mouth
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.985; p.vy *= 0.985;
+      if (p.life <= 0) { basterParts.splice(i, 1); continue; }
+    }
+  }
+}
+
+function basterPartsDraw(){
+  if (!basterParts.length) return;
+  ctx.save();
+  ctx.shadowBlur = 0;
+  ctx.font = "14px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = lightMode ? "black" : "white";
+  basterParts.forEach(p => {
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life / 20));
+    ctx.fillText(p.ch, p.x, p.y);
+  });
+  ctx.restore();
+}
+
+// runs every game tick
+function basterUpdate(){
+  if (!basters.length || !player) return;
+  if (timeStopLeftMs > 0 && timeStopMine) return;   // frozen by your own time stop
+
+  const tC = BASTER_ARRIVE_MS + BASTER_CHARGE_MS;   // beam starts
+  const tF = tC + BASTER_FIRE_MS;                   // beam ends
+  const tL = tF + BASTER_LEAVE_MS;                  // gone
+
+  for (let i = basters.length - 1; i >= 0; i--) {
+    const b = basters[i];
+    b.t += STEP_MS;
+    if (b.t >= tL) { basters.splice(i, 1); continue; }
+
+    // whose baster is it? mine follows me, another player's follows them
+    let ownX = player.x, ownY = player.y, ownAim = null;
+    if (b.owner) {
+      const orp = remotePlayers[b.owner];
+      if (orp) {
+        b.opx = (orp.displayX !== undefined) ? orp.displayX : orp.x;
+        b.opy = (orp.displayY !== undefined) ? orp.displayY : orp.y;
+        const oa = (orp.shownAim !== undefined) ? orp.shownAim : orp.aimAngle;
+        if (Number.isFinite(oa)) b.oaim = oa;
+      }
+      ownX = b.opx; ownY = b.opy; ownAim = b.oaim;
+    }
+    const parkX = b.fired ? b.lockX : ownX + b.ox;   // after it blasts, it stays where it is
+    const parkY = b.fired ? b.lockY : ownY + b.oy;
+    b.alpha = 1;
+    b.scale = 1;
+
+    if (b.t < BASTER_ARRIVE_MS) {
+      // flying in from behind you
+      const k = b.t / BASTER_ARRIVE_MS;
+      const e = 1 - Math.pow(1 - k, 3);
+      b.x = parkX - b.fx * BASTER_SPAWN_BACK * (1 - e);
+      b.y = parkY - b.fy * BASTER_SPAWN_BACK * (1 - e);
+      b.scale = 0.2 + 0.8 * e;
+    } else if (b.t < tF) {
+      b.x = parkX;
+      b.y = parkY;
+      if (!b.fired) {
+        // charging: trembles and swells
+        const k = (b.t - BASTER_ARRIVE_MS) / BASTER_CHARGE_MS;
+        b.x += (Math.random() - 0.5) * 3 * k;
+        b.y += (Math.random() - 0.5) * 3 * k;
+        b.scale = 1 + 0.12 * k;
+      }
+    } else {
+      // flying away
+      const k = (b.t - tF) / BASTER_LEAVE_MS;
+      b.x = parkX - b.fx * BASTER_LEAVE_DIST * k * k;
+      b.y = parkY - b.fy * BASTER_LEAVE_DIST * k * k;
+      b.alpha = 1 - k;
+    }
+
+    // turns to face where you are aiming, until the beam fires (then it locks)
+    if (!b.fired) {
+      const aimPX = (ownAim === null) ? mouse.x : ownX + Math.cos(ownAim) * 300;
+      const aimPY = (ownAim === null) ? mouse.y : ownY + Math.sin(ownAim) * 300;
+      const playerAim = Math.atan2(aimPY - ownY, aimPX - ownX);
+      const tx = aimPX - b.x, ty = aimPY - b.y;
+      const target = Math.hypot(tx, ty) < 40 ? playerAim : Math.atan2(ty, tx);
+      let diff = target - b.ang;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      b.ang += diff * 0.2;
+    }
+
+    // the moment the beam starts
+    if (!b.fired && b.t >= tC) {
+      b.lockX = parkX;
+      b.lockY = parkY;
+      b.fired = true;
+      shake = Math.max(shake, b.owner ? 8 : BASTER_SHOOT_SHAKE);
+      playSound("https://file.garden/Zfwe_2Ig9weivlFh/cannon_fire.wav");
+      basterBurst(b);
+    }
+
+    // kick back while the beam is on
+    if (b.fired && b.t < tF) {
+      const kick = (1 - (b.t - tC) / BASTER_FIRE_MS) * 10;
+      b.x -= Math.cos(b.ang) * kick;
+      b.y -= Math.sin(b.ang) * kick;
+    }
+
+    // mouth + beam line
+    b.mx = b.x + Math.cos(b.ang) * BASTER_SIZE * 0.45;
+    b.my = b.y + Math.sin(b.ang) * BASTER_SIZE * 0.45;
+    b.ex = b.mx + Math.cos(b.ang) * BASTER_BEAM_LEN;
+    b.ey = b.my + Math.sin(b.ang) * BASTER_BEAM_LEN;
+
+    // sucking particles while it charges (same look as the gravity gun pull)
+    if (!b.fired && b.t >= BASTER_ARRIVE_MS && basterParts.length < BASTER_PART_MAX && Math.random() < 0.5) {
+      const pa = Math.random() * Math.PI * 2;
+      basterParts.push({
+        kind: 0, b: b,
+        x: b.mx + Math.cos(pa) * BASTER_SUCK_RADIUS,
+        y: b.my + Math.sin(pa) * BASTER_SUCK_RADIUS,
+        ch: BASTER_PART_CHARS[Math.floor(Math.random() * BASTER_PART_CHARS.length)],
+        life: 45
+      });
+    }
+
+    // beam thickness: snaps wide, then thins out
+    b.w = 0;
+    if (b.fired && b.t < tF) {
+      const k = (b.t - tC) / BASTER_FIRE_MS;
+      const w = k < 0.1 ? k / 0.1 : 1 - Math.pow((k - 0.1) / 0.9, 2.2);
+      b.w = Math.max(0, w) * BASTER_BEAM_WIDTH * (0.92 + Math.random() * 0.08);
+      shake = Math.max(shake, b.owner ? 3 : BASTER_HOLD_SHAKE);
+      if (b.w > 3 && !b.owner) basterKill(b);
+      basterStream(b);
+    }
+  }
+}
+
+function basterDraw(){
+  if (!basters.length) return;
+  const col = lightMode ? "black" : "white";
+  basters.forEach(b => {
+    // ---- the beam ----
+    if (b.fired && b.w > 1) {
+      ctx.save();
+      ctx.translate(b.mx, b.my);
+      ctx.rotate(b.ang);
+      ctx.fillStyle = col;
+      // no glow
+const taper = 90;   // length of the pointed, faded end next to the baster
+      const rgb = lightMode ? "0,0,0" : "255,255,255";
+      const fade = ctx.createLinearGradient(0, 0, taper, 0);
+      fade.addColorStop(0, "rgba(" + rgb + ",0)");
+      fade.addColorStop(1, "rgba(" + rgb + ",1)");
+      ctx.fillStyle = fade;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);                          // the point, right at the baster
+      ctx.lineTo(taper, -b.w / 2);
+      ctx.lineTo(BASTER_BEAM_LEN, -b.w / 2);
+      ctx.lineTo(BASTER_BEAM_LEN, b.w / 2);
+      ctx.lineTo(taper, b.w / 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ---- the glow gathering in the mouth while it charges ----
+    if (!b.fired && b.t >= BASTER_ARRIVE_MS) {
+      const k = (b.t - BASTER_ARRIVE_MS) / BASTER_CHARGE_MS;
+      ctx.save();
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(b.mx, b.my, 2 + k * 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ---- the skull itself (mouth points at the target) ----
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, b.alpha);
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.ang);
+    ctx.scale(b.scale, b.scale);
+    ctx.font = BASTER_SIZE + "px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(BASTER_GLYPH, 0, 0);
+    ctx.restore();
+  });
+}
+
 // ====== UPDATE ======
 function update(time){
     mpFrameT = performance.now();
@@ -7912,6 +8459,9 @@ function update(time){
    updateMagnet();
    tsTick();
    megaUpdate();
+   basterUpdate();
+   basterPartsUpdate();
+   gugDropWatch();
    hostCheckPickupCollisions();
    Object.values(remotePlayers).forEach(rp=>{
      if(rp.displayX===undefined) rp.displayX = rp.x;
@@ -7946,7 +8496,7 @@ function update(time){
        arr.forEach(o => { if(o.tw && typeof o.tw === "object") return; mpSampleSnaps(o, interpT, "x", "y"); });
      });
      walls.forEach(w=>{ if(w.shake > 0) w.shake *= 0.95; });
-     if(wavesMode && boss.active){
+     if((wavesMode || openWorldMode) && boss.active){
        boss.t++;
        if(boss.hit > 0) boss.hit = Math.max(0, boss.hit - 0.07);
        if(boss.tx !== undefined){
@@ -8212,6 +8762,7 @@ else if(player.alive && player.shootingHeld){
         case "railgun": chargeRailgun(now); break;
         case "blackhole": fireBlackHole(now); break;
         case "megacannon": fireMegaCannon(now); break;
+        case "Magic_blaster": fireMagic_blaster(now); break;
 
         default:       break;
     }
@@ -8493,6 +9044,17 @@ if (Math.abs(diff) < 0.1 && t.cooldown <= 0) {
   const rbView = mpViewCenter();       // where the camera is (the player you're spectating when dead)
   for (let i = remoteBullets.length - 1; i >= 0; i--) {
     const rb = remoteBullets[i];
+    // TIME STOP: the player who stopped time has their bullets hanging in mid-air (line included)
+    if (timeStopLeftMs > 0 && !timeStopMine && tsOwnerId && rb.owner === tsOwnerId) {
+      if (!rb.tsTrail) {
+        if (rb.trail.length === 0) for (let k = 7; k >= 0; k--) rb.trail.push({ x: rb.x - rb.dx * k, y: rb.y - rb.dy * k, life: 8 - k });
+        rb.tsTrail = rb.trail.map(t => ({ x: t.x, y: t.y, life: t.life }));
+      } else {
+        rb.trail = rb.tsTrail.map(t => ({ x: t.x, y: t.y, life: t.life }));   // the game fades trails while drawing, so put the line back
+      }
+      continue;
+    }
+    if (rb.tsTrail) rb.tsTrail = null;
     rb.x += rb.dx;
     rb.y += rb.dy;
     if (rb.bouncesLeft > 0) {
@@ -9031,7 +9593,7 @@ if (typeof tsHeldBullets !== "undefined" && tsHeldBullets.length) bullets = bull
 if(isMultiplayerClient && player.alive && !inCar){
   for(let ci = 0; ci < enemies.length; ci++){
     const ce2 = enemies[ci];
-    if(ce2.noDamage || ce2.gravity) continue;
+    if(ce2.noDamage || ce2.gravity || ce2.fl) continue;
     if(Math.hypot(player.x - ce2.x, player.y - ce2.y) < 15){
       if(ce2.instaKill) damagePlayer(6);
       damagePlayer(2);
@@ -9044,6 +9606,7 @@ enemies.forEach((e, ei) => {
   // calculate angle toward nearest player
   if (e.gravity) return;   // the gravity gun has this one
   if (tsEnemiesFrozen()) return;   // TIME STOP: this enemy is frozen
+  if (e.fleeing) { owFleeStep(e); return; }   // open world boss: scrambling off the screen
   const __nearestP = findNearestPlayerPos(e.x, e.y);
   if(!__nearestP) return; // nobody alive to chase — stand still this frame
   let ang = Math.atan2(__nearestP.y - e.y, __nearestP.x - e.x);
@@ -9306,6 +9869,18 @@ for (let ei = 0; ei < enemies.length; ei++) {
 
 
 
+// open world boss: enemies that ran off the screen are gone (no kill counted, no drop)
+if (!isMultiplayerClient) {
+  for (let fi = enemies.length - 1; fi >= 0; fi--) { if (enemies[fi].fleeGone) enemies.splice(fi, 1); }
+  for (let fi = bossEnemies.length - 1; fi >= 0; fi--) {
+    const fb = bossEnemies[fi];
+    if (!fb.fleeGone) continue;
+    const fgi = gugSeen.indexOf(fb);
+    if (fgi !== -1) gugSeen.splice(fgi, 1);
+    bossEnemies.splice(fi, 1);
+  }
+}
+
 // === SPECIAL ENEMY SPAWNS (♀ shooters + Worm boss) ===
 let survivalSecs = (performance.now() - startTime) / 1000;
 let survivalMs   = performance.now() - startTime;
@@ -9465,7 +10040,7 @@ if (tree) {
     }
 }
 // --- ♀ shooter enemies appear after 70 seconds ---
-if (survivalSecs > 60 && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive()) {
+if (survivalSecs > 60 && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive() && !boss.active) {
   // a bit more likely right when they start showing up, settling back to the normal rate over the next 90 seconds
   const shooterEarlyBoost = 1 + 0.6 * Math.max(0, 1 - (survivalSecs - 60) / 90);
   if (Math.random() < 0.001 * shooterEarlyBoost) {
@@ -9482,7 +10057,7 @@ if (survivalSecs > 60 && !tutorialActive && !isMultiplayerClient && !wavesMode &
 }
 
 // --- GUGERBIRD (normal mode): appears ~40s after the shooters start, then now and then, one at a time ---
-if (survivalSecs > 125 && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive() && !bossEnemies.some(b => b.gug)) {
+if (survivalSecs > 125 && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive() && !boss.active && !bossEnemies.some(b => b.gug)) {
   if (Math.random() < 0.0004) {
     let gSide = Math.floor(Math.random() * 4);
     let gx = 0, gy = 0;
@@ -9493,13 +10068,19 @@ if (survivalSecs > 125 && !tutorialActive && !isMultiplayerClient && !wavesMode 
     if (gSide === 3) { gx = canvas.width; gy = Math.random() * canvas.height; }
 
     const gugHpNormal = 180 + Math.min(120, Math.floor((survivalSecs - 125) / 5));   // gets a bit tougher the longer you survive
+    if (owGugFirstSecs === null) owGugFirstSecs = survivalSecs;   // starts the open world boss countdown
     bossEnemies.push({ id: nextEnemyId++, x: gx, y: gy, speed: 0.45, lastShot: performance.now(),
                        fireDelay: 2800, health: gugHpNormal, maxHealth: gugHpNormal, gug: true, spin: 0 });
   }
 }
 
+// --- OPEN WORLD BOSS: comes 2 minutes after the first gugerbird ---
+if (openWorldMode && !wavesMode && !owBossSpawned && owGugFirstSecs !== null && survivalSecs >= owGugFirstSecs + OW_BOSS_DELAY_SECS && !tutorialActive && !isMultiplayerClient && !playerActive() && !boss.active) {
+  owBossStart();
+}
+
 // --- WORM BOSS SPAWN: only spawn after 1 minute with warning ---
-if (survivalMs > WORM_WARN_TIME && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive()) {
+if (survivalMs > WORM_WARN_TIME && !tutorialActive && !isMultiplayerClient && !wavesMode && !playerActive() && !boss.active) {
     // chance for a worm to start warning
   if (worms.length === 0 && Math.random() < 0.0005) {
 
@@ -9528,6 +10109,7 @@ if (worms.length > 0 && !isMultiplayerClient && !tsEnemiesFrozen()) {
   bossEnemies.forEach(e=>{
     if (e.gravity) return;   // the gravity gun has this one
     if (tsEnemiesFrozen()) { e.lastShot = performance.now(); return; }   // TIME STOP: frozen, no shooting
+    if (e.fleeing) { owFleeStep(e); return; }   // scrambling away: no chasing, no shooting
     const __nearestB = findNearestPlayerPos(e.x, e.y);
     if(!__nearestB) return;
     let ang = Math.atan2(__nearestB.y-e.y,__nearestB.x-e.x);
@@ -9791,11 +10373,12 @@ for (let i = explosionRings.length - 1; i >= 0; i--) {
   player.recoilAngle *= 0.94;
   player.recoilBack *= 0.88;
 
+  if(openWorldMode && !wavesMode && boss.active && !tutorialActive && !isMultiplayerClient && !tsEnemiesFrozen()) bossUpdate();
   if(wavesActive()){
     if(!tsEnemiesFrozen()) updateWaves();
   } else if(playerActive()){
     playerBotUpdate();
-  } else if(!tutorialActive && !isMultiplayerClient && time - lastSpawn > spawnDelay / mpEnemyMult() && !tsEnemiesFrozen()){
+  } else if(!tutorialActive && !isMultiplayerClient && time - lastSpawn > spawnDelay / mpEnemyMult() && !tsEnemiesFrozen() && !boss.active){
     spawnEnemy();
     lastSpawn = time;
     spawnDelay = Math.max(minSpawnDelay, spawnDelay * spawnAccel);
@@ -9841,19 +10424,61 @@ const b3d = { loading: false, ready: false, failed: false, renderer: null, scene
               pivot: null, holder: null, mats: [], el: null, shown: false };
 
 function wavesActive(){ return wavesMode && !tutorialActive && !isMultiplayerClient; }
-function bossVisible(){ return wavesMode && boss.active && !tutorialActive && (gameState === "playing" || gameState === "paused"); }
+function bossVisible(){ return (wavesMode || openWorldMode) && boss.active && !tutorialActive && (gameState === "playing" || gameState === "paused"); }
 function bossLayerOn(){ return bossVisible() && b3d.ready; }
+
+// ===== OPEN WORLD BOSS =====
+let bossAX = 0, bossAY = 0;   // top-left corner of the screen in world coords (stays 0,0 outside open world)
+
+// ===== OPEN WORLD BOSS: every enemy panics and scrambles off the screen instead of just vanishing =====
+function owEnemiesFlee(){
+  const panic = (e) => {
+    const near = findNearestPlayerPos(e.x, e.y) || (player ? { x: player.x, y: player.y } : { x: e.x - 1, y: e.y });
+    e.fleeing = true;
+    e.noDamage = true;     // a scared bird doesn't hurt you
+    e.fleeAng = Math.atan2(e.y - near.y, e.x - near.x) + (Math.random() - 0.5) * 0.7;   // runs AWAY from you, a bit scattered
+    e.fleeSpd = 5 + Math.random() * 4;
+    e.fleeT = 0;
+  };
+  enemies.forEach(panic);
+  bossEnemies.forEach(panic);
+}
+
+// moves one fleeing enemy; marks it to be removed once it is off the screen
+function owFleeStep(e){
+  e.fleeT = (e.fleeT || 0) + 1;
+  e.x += Math.cos(e.fleeAng) * e.fleeSpd;
+  e.y += Math.sin(e.fleeAng) * e.fleeSpd;
+  e.fleeSpd *= 1.01;       // they speed up as they panic
+  const near = findNearestPlayerPos(e.x, e.y);
+  const gone = !near || Math.hypot(e.x - near.x, e.y - near.y) > Math.hypot(canvas.width, canvas.height) / 2 + 80;
+  if (gone || e.fleeT > 600) e.fleeGone = true;
+}
+
+function owBossStart(){
+  if(boss.active || !player || !player.alive) return;
+  owBossSpawned = true;
+  bossStart(1);
+  worms = [];
+  bullets = bullets.filter(b => !b.enemyBullet);
+  // start far outside the screen, then float in toward the player
+  const a = Math.random() * Math.PI * 2;
+  boss.x = player.x + Math.cos(a) * 1100;
+  boss.y = player.y + Math.sin(a) * 1100;
+  boss.z = -500;
+}
 
 function wavesBanner(text, sub, frames){
   wv.bannerText = text; wv.bannerSub = sub || ""; wv.bannerT = frames; wv.bannerMax = frames;
 }
 
 function wavesReset(){
+  owGugFirstSecs = null; owBossSpawned = false;
   wv.n = 0; wv.state = "intermission"; wv.timer = 150; wv.t = 0;
   wv.toSpawn = 0; wv.toSpawnShooters = 0; wv.bannerT = 0;
   boss.active = false; boss.state = "none"; boss.hit = 0; boss.dyingT = 0;
   if(typeof jessModeOff === "function") jessModeOff();
-  if(wavesMode) bossPreload();
+  if(wavesMode || openWorldMode) bossPreload();
 }
 
 // ------------------------- 3D loading (three.js) -------------------------
@@ -9964,7 +10589,8 @@ function renderBoss3D(){
   let s = 1 + 0.12 * boss.hit;
   let rz = (Math.random() - 0.5) * 0.7 * boss.hit;
   if(dying){ const p = boss.dyingT / 200; s *= 1 - 0.55 * p * p; rz += boss.dyingT * 0.012; }
-  b3d.pivot.position.set(boss.x - 400 + jx, 300 - boss.y + jy, boss.z || 0);
+  const bcam = getCameraState();
+  b3d.pivot.position.set(boss.x + bcam.x - 400 + jx, 300 - (boss.y + bcam.y) + jy, boss.z || 0);
   b3d.pivot.rotation.set(Math.sin(boss.t / 55) * 0.02, Math.sin(boss.t / 70) * 0.1, rz);
   b3d.pivot.scale.setScalar(s);
 
@@ -9990,7 +10616,8 @@ function renderBoss3D(){
 function drawBossFallback(){
   const jx = (Math.random() - 0.5) * 30 * boss.hit, jy = (Math.random() - 0.5) * 30 * boss.hit;
   ctx.save();
-  ctx.translate(boss.x + jx, boss.y + jy);
+  const fcam = getCameraState();
+  ctx.translate(boss.x + fcam.x + jx, boss.y + fcam.y + jy);
   ctx.rotate(Math.sin(boss.t / 40) * 0.1 + (boss.state === "dying" ? boss.dyingT * 0.012 : 0));
   ctx.font = "300px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.fillStyle = boss.hit > 0.3 ? "#ff5533" : "#7a4a1e";
@@ -10042,6 +10669,10 @@ function wavesStart(n){
 
 // DEBUG: console.log("/skipwaves") then press Enter in-game -> jumps straight to the next boss wave
 function wavesSkipToBoss(){
+  if(openWorldMode && !wavesMode){
+    if(gameState === "playing" && player && player.alive && !boss.active && !tutorialActive && !isMultiplayerClient) owBossStart();
+    return;
+  }
   if(!wavesActive() || gameState !== "playing" || !player || !player.alive) return;
   if(boss.active) return;
   const next = (Math.floor(wv.n / 10) + 1) * 10;
@@ -10081,15 +10712,15 @@ function bossStart(level){
     cooldown: 150, lastAttack: "", label: "", dyingT: 0, trickle: 300, gapCol: -1, ammoT: 120, swordCd: 0, hitSnd: 0, row: 0,
     x: 400, y: -260, z: -500,
     mini: [] });
-  enemies = []; bossEnemies = [];
+  if (openWorldMode && !wavesMode && !isMultiplayerClient) { owEnemiesFlee(); } else { enemies = []; bossEnemies = []; }
   boss.maxHp = Math.round(BOSS_BASE_HP * dm * (1 + 0.6 * (level - 1)) * (1 + 0.8 * Object.keys(remotePlayers).length));
   cars = [];
   gunPickups = gunPickups.filter(g => g.gunKey !== "nuke");
   [pickups, gunPickups, healthKits, Magnetpickup].forEach(arr => arr.forEach(o => {
-    if (o.y < canvas.height / 2) o.y = canvas.height / 2 + Math.random() * (canvas.height / 2 - 40);
+    if (wavesMode && o.y < canvas.height / 2) o.y = canvas.height / 2 + Math.random() * (canvas.height / 2 - 40);
   }));
   boss.hp = boss.maxHp;
-  window.lastWormWarning = { text: "⚠ WAVE " + (level * 10) + " — SOMETHING IS COMING ⚠", t: performance.now(), duration: 3200 };
+  window.lastWormWarning = { text: wavesMode ? "⚠ WAVE " + (level * 10) + " — SOMETHING IS COMING ⚠" : "⚠ SOMETHING IS COMING ⚠", t: performance.now(), duration: 3200 };
   playSound("https://file.garden/Zfwe_2Ig9weivlFh/tree_death_loud.mp3");
 }
 
@@ -10385,8 +11016,8 @@ function bossRunAttack() {
       const every = 110;
       if (t % every === 10) {
         [-1, 1].forEach(side => {
-          const ox = side < 0 ? 62 : 738;
-          const oy = Math.max(70, Math.min(530, player.y + (Math.random() - 0.5) * 160));
+          const ox = bossAX + (side < 0 ? 62 : 738);
+          const oy = Math.max(bossAY + 70, Math.min(bossAY + 530, player.y + (Math.random() - 0.5) * 160));
           for (let i = 0; i < 2; i++) {
             const gy = oy + (i - 0.5) * 70;
             const aim = Math.atan2(player.y - gy, player.x - ox);
@@ -10405,19 +11036,20 @@ function bossRunAttack() {
     case "rockets": {
       if (t === 0) {
         boss.rkGuns = [
-          bossMini(80,  300, 0,            99999, null, 26, "rocketLauncher"),
-          bossMini(720, 300, Math.PI,      99999, null, 26, "rocketLauncher"),
+          bossMini(bossAX + 80,  bossAY + 300, 0,            99999, null, 26, "rocketLauncher"),
+          bossMini(bossAX + 720, bossAY + 300, Math.PI,      99999, null, 26, "rocketLauncher"),
         ];
         boss.rkGuns.forEach(g => g.holdFor = "rockets");
       }
       (boss.rkGuns || []).forEach((g, i) => {
         if (!g || !boss.mini.includes(g)) return;
+        g.x = bossAX + (i ? 720 : 80); g.y = bossAY + 300;   // launchers stay on the edges of the screen
         g.ang = Math.atan2(player.y - g.y, player.x - g.x);   // launchers keep aiming at you
         const first = 40 + i * 28;
         if (t >= first && t < 260 && (t - first) % 130 === 0) {
           const mx = g.x + Math.cos(g.ang) * g.reach, my = g.y + Math.sin(g.ang) * g.reach;
-          const tx = Math.max(30, Math.min(770, player.x + (Math.random() - 0.5) * 50));
-          const ty = Math.max(30, Math.min(570, player.y + (Math.random() - 0.5) * 50));
+          const tx = Math.max(bossAX + 30, Math.min(bossAX + 770, player.x + (Math.random() - 0.5) * 50));
+          const ty = Math.max(bossAY + 30, Math.min(bossAY + 570, player.y + (Math.random() - 0.5) * 50));
           bossRocket(mx, my, tx, ty);
           g.kick = 1;
         }
@@ -10430,7 +11062,7 @@ function bossRunAttack() {
       const every = P ? 48 : 60;
       if (t % every === 10) {
         const side = (Math.floor(t / every) % 2 ? -1 : 1) * 130;
-        const ox = Math.max(50, Math.min(750, boss.x + side));
+        const ox = Math.max(bossAX + 50, Math.min(bossAX + 750, boss.x + side));
         const oy = boss.y + 30;
         const aim = Math.atan2(player.y - oy, player.x - ox);
         const n = P ? 5 : 3;
@@ -10493,7 +11125,7 @@ function bossRunAttack() {
       guns.forEach((g, i) => {
         if (!g) return;
         const sgn = i ? 1 : -1;
-        g.x = Math.max(g.reach + 6, Math.min(794 - g.reach, boss.x + sgn * (140 + g.reach)));
+        g.x = Math.max(bossAX + g.reach + 6, Math.min(bossAX + 794 - g.reach, boss.x + sgn * (140 + g.reach)));
         g.y = boss.y + 30;
       });
       const every = 20;
@@ -10568,8 +11200,8 @@ function bossRunAttack() {
         const halfGap = P ? 0.5 : 0.65;
 
         const toCenter = Math.atan2(
-          300 - player.y,
-          400 - player.x
+          bossAY + 300 - player.y,
+          bossAX + 400 - player.x
         );
 
         const gap = toCenter + (Math.random() - 0.5) * 0.8;
@@ -10742,11 +11374,11 @@ function bossRunAttack() {
           if (i >= g && i < g + gapW) continue;
 
           bossMini(
-            cell / 2 + i * cell,
-            14,
+            bossAX + cell / 2 + i * cell,
+            bossAY + 14,
             Math.PI / 2,
             30,
-            (x, y) => bossFireV(x, 22, 0, vy, "▼")
+            (x, y) => bossFireV(x, bossAY + 22, 0, vy, "▼")
           );
         }
       }
@@ -10781,7 +11413,7 @@ function bossCollide(){
   for(let j = bullets.length - 1; j >= 0; j--){
     const b = bullets[j];
     if(b.enemyBullet) continue;
-    if(Math.hypot(b.x - boss.x, b.y - boss.y) < BOSS_HIT_R){
+    if(!b.bossHit && Math.hypot(b.x - boss.x, b.y - boss.y) < BOSS_HIT_R){
       let d = Math.min(b.damage || 10, 40);
       if(b.isRocket){
         d = 150;
@@ -10789,7 +11421,8 @@ function bossCollide(){
         shakeTime = 40;
         playSound("https://file.garden/Zfwe_2Ig9weivlFh/explotion.wav");
       }
-      bullets.splice(j, 1);
+      if(b.isRocket) bullets.splice(j, 1);   // rockets still blow up on the boss
+      else b.bossHit = true;                 // every other bullet hurts the boss once, then flies on
       bossDamage(d, b.x, b.y);
       if(boss.state !== "fight") break;
     }
@@ -10810,6 +11443,8 @@ function bossCollide(){
 
 function bossUpdate(){
   boss.t++;
+  bossAX = (openWorldMode && !wavesMode && player) ? player.x - 400 : 0;
+  bossAY = (openWorldMode && !wavesMode && player) ? player.y - 300 : 0;
   bossMiniUpdate();
   bossRocketsUpdate();
   if(boss.hit > 0) boss.hit = Math.max(0, boss.hit - 0.07);
@@ -10827,14 +11462,26 @@ function bossUpdate(){
   if(boss.state === "descend"){
     // floats down from above and "toward" the screen, shaking everything
     const D = 420, p = Math.min(1, boss.t / D), e = 1 - Math.pow(1 - p, 3);
-    boss.y = -260 + (BOSS_Y + 260) * e;
+    if(openWorldMode && !wavesMode){
+      // open world: slowly float over to wherever the player is
+      boss.x += (player.x - boss.x) * 0.012;
+      boss.y += (player.y - 190 - boss.y) * 0.012;
+    } else {
+      boss.y = -260 + (BOSS_Y + 260) * e;
+    }
     boss.z = -500 * (1 - e);
     shake = Math.max(shake, 16 - 8 * p);
     if(boss.t >= D){ boss.state = "fight"; boss.t = 0; boss.z = 0; shake = Math.max(shake, 30); }
   }
   else if(boss.state === "fight"){
-    boss.x = 400 + Math.sin(boss.t / 110) * (boss.phase === 2 ? 190 : 140);
-    boss.y = BOSS_Y + Math.sin(boss.t / 47) * 14;
+    if(openWorldMode && !wavesMode){
+      // open world: drift after the player, hovering above them
+      boss.x += (player.x + Math.sin(boss.t / 110) * 140 - boss.x) * 0.03;
+      boss.y += (player.y - 190 + Math.sin(boss.t / 47) * 14 - boss.y) * 0.03;
+    } else {
+      boss.x = 400 + Math.sin(boss.t / 110) * (boss.phase === 2 ? 190 : 140);
+      boss.y = BOSS_Y + Math.sin(boss.t / 47) * 14;
+    }
 
     if(false && boss.phase === 1 && boss.hp < boss.maxHp * 0.5){
       boss.phase = 2; boss.attack = null; boss.cooldown = 90; shake = 40;
@@ -10876,16 +11523,19 @@ function bossUpdate(){
       for(let i = 0; i < 4; i++){ const p = randomPointInPlayableArea(40); pickups.push({ id: nextItemId++, x: p.x, y: p.y }); }
       spawnGunPickup(); spawnGunPickup();
       wv.state = "intermission"; wv.timer = 330;
-      wavesBanner("BOSS DEFEATED!", "the waves go on...", 220);
+      if(wavesMode) wavesBanner("BOSS DEFEATED!", "the waves go on...", 220);
+      else window.lastWormWarning = { text: "✦ BOSS DEFEATED ✦", t: performance.now(), duration: 2600 };
     }
   }
 }
 
 // ------------------------- HUD -------------------------
 function drawWavesHUD(){
-  if(!wavesMode || tutorialActive || gameState !== "playing") return;
+  if((!wavesMode && !(openWorldMode && boss.active)) || tutorialActive || gameState !== "playing") return;
+  ctx.save(); applyCameraTransform();
   bossDrawGuns();
   bossDrawRockets();
+  ctx.restore();
   ctx.save();
   ctx.textAlign = "center";
   const fg = lightMode ? "black" : "white";
@@ -10895,11 +11545,12 @@ function drawWavesHUD(){
   if(wv.state === "boss") status = "WAVE " + wv.n + " — BOSS";
   else if(wv.state === "intermission") status = wv.n === 0 ? "GET READY" : "WAVE " + wv.n + " CLEARED";
   else status = "WAVE " + wv.n;
-  ctx.fillText(status, 400, 26);
+  if(wavesMode) ctx.fillText(status, 400, 26);
 
   ctx.font = "11px 'Times New Roman', Times, serif";
   ctx.globalAlpha = 0.8;
-  if(wv.state === "active") ctx.fillText("enemies left: " + (wv.toSpawn + wv.toSpawnShooters + enemies.length + bossEnemies.length), 400, 44);
+  if(!wavesMode){ if(boss.label) ctx.fillText("* " + boss.label, 400, 44); }
+  else if(wv.state === "active") ctx.fillText("enemies left: " + (wv.toSpawn + wv.toSpawnShooters + enemies.length + bossEnemies.length), 400, 44);
   else if(wv.state === "intermission") ctx.fillText("next wave in " + Math.ceil(wv.timer / 60), 400, 44);
   else if(boss.label) ctx.fillText("* " + boss.label, 400, 44);
   ctx.globalAlpha = 1;
@@ -11853,6 +12504,8 @@ else {
     });
 
     megaDrawBullets();
+    basterDraw();
+    basterPartsDraw();
 
     // Black Hole Shotgun beam flash
     blackHoleBeams.forEach(beam=>{
@@ -11953,7 +12606,7 @@ gunPickups.forEach(g=>{
   if (g.rotation) ctx.rotate(g.rotation); // ✅ apply rotation
 
   // Mega Cannon flag pickup: bigger + pulsing glow
-  if (g.gunKey === "megacannon") {
+  if (g.gunKey === "megacannon" || g.gunKey === "Magic_blaster") {
     const megaPulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.006);
     ctx.scale(1.5, 1.5);
     ctx.shadowColor = "rgba(255, 200, 60, 0.6)";
@@ -12621,7 +13274,7 @@ setInterval(()=>{
 }, 3000);
 // ====== CAR SPAWN SYSTEM ======
 setInterval(() => {
-  if (gameState === "playing" && !inCar && !tutorialActive && !isMultiplayerClient && !(wavesMode && boss.active) && !playerActive() && Math.random() < 0.54) { // 20% chance
+  if (gameState === "playing" && !inCar && !tutorialActive && !isMultiplayerClient && !boss.active && !playerActive() && Math.random() < 0.54) { // 20% chance
     const carSpawnPos = randomPointInPlayableArea(40);
     cars.push({
       id: nextItemId++,
@@ -12748,6 +13401,10 @@ document.addEventListener("keydown", e => {
 const ALIASES = {
   rocketlauncher: "rocketLauncher",
   rl: "rocketLauncher",
+  magic_blaster: "Magic_blaster",
+  magicblaster: "Magic_blaster",
+  magic: "Magic_blaster",
+  mb: "Magic_blaster",
   pistol: "pistol",  // example default gun
   // add more aliases here if needed
 };
@@ -13051,12 +13708,12 @@ brodies gay
     unlockPlayerMode();
 } else if (cmd.toLowerCase() === "/jessmode") {
     jessMode();
-} else if (cmd.toLowerCase() === "/skipwaves") {
-    if (!wavesMode) {
-      console.log("/skipwaves only works in the Waves gamemode.");
+} else if (cmd.toLowerCase() === "/skipwaves" || cmd.toLowerCase() === "/skipwave") {
+    if (!wavesMode && !openWorldMode) {
+      console.log("/skipwaves only works in the Waves and Openworld gamemodes.");
     } else {
       wavesSkipToBoss();
-      console.log("Skipping to the boss wave!");
+      console.log("Skipping to the boss!");
     }
 } else if (cmd.startsWith("/runfunction ")) {
     // Ignore — handled by the DevTools console system
@@ -13548,7 +14205,7 @@ setInterval(() => {
   const TICK = 0.05;   // this runs every 50ms
   bossTheme.muted = !musicEnabled;   // respects your "Game Music" option
 
-  const inWaves = wavesMode && !tutorialActive && (gameState === "playing" || gameState === "paused");
+  const inWaves = (wavesMode || openWorldMode) && !tutorialActive && (gameState === "playing" || gameState === "paused");
 
   // not in a waves game (title, game over, other modes): put everything back to normal
   if (!inWaves) {
@@ -13568,15 +14225,20 @@ setInterval(() => {
   }
 
   const bossUp     = boss.active && boss.state !== "dying";
-  const bossComing = wv.state === "intermission" && (wv.n + 1) % 10 === 0;   // the "something is coming..." gap
+  const bossComing = wavesMode && wv.state === "intermission" && (wv.n + 1) % 10 === 0;   // the "something is coming..." gap
 
   // 1) boss appears -> his theme starts immediately
   if (bossUp && (musicMode === "normal" || musicMode === "fadeOutNormal" || musicMode === "fadeInNormal")) {
     musicMode = "boss";
-    bgMusic.pause();
-    bgMusic.volume = 0;
-    bossTheme.currentTime = 0;
-    bossTheme.volume = BOSS_THEME_VOL;
+    if (openWorldMode && !wavesMode) {
+      bossTheme.currentTime = 0;
+      bossTheme.volume = 0;          // open world: the normal music fades out while the boss theme fades in
+    } else {
+      bgMusic.pause();
+      bgMusic.volume = 0;
+      bossTheme.currentTime = 0;
+      bossTheme.volume = BOSS_THEME_VOL;
+    }
     bossTheme.play().catch(() => {});
   }
   // 2) the wave before the boss is cleared -> normal music starts fading out
@@ -13589,8 +14251,17 @@ setInterval(() => {
     if (bgMusic.volume <= 0) bgMusic.pause();
   }
 
+  if (musicMode === "boss" && openWorldMode && !wavesMode) {
+    // open world: normal music fades out smoothly while the boss theme fades in
+    if (bgMusic.volume > 0) {
+      bgMusic.volume = Math.max(0, bgMusic.volume - NORMAL_MUSIC_VOL * TICK / MUSIC_FADE_OUT_SECS);
+      if (bgMusic.volume <= 0) bgMusic.pause();
+    }
+    if (bossTheme.volume < BOSS_THEME_VOL) bossTheme.volume = Math.min(BOSS_THEME_VOL, bossTheme.volume + BOSS_THEME_VOL * TICK / MUSIC_FADE_OUT_SECS);
+  }
+
   if (musicMode === "boss") {
-    if (!bgMusic.paused) bgMusic.pause();            // keeps the normal music off if you resume from pause
+    if (!bgMusic.paused && bgMusic.volume <= 0) bgMusic.pause();            // keeps the normal music off if you resume from pause
     if (bossTheme.paused) bossTheme.play().catch(() => {});
     if (!bossUp) musicMode = "fadeOutBoss";           // he's dying -> fade his theme out
   }
