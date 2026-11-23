@@ -396,7 +396,7 @@ let newblood = true;   // true = new smooth blood burst, false = old blood
 let selectedGameMode = 0;
 
 // ============ GAME SETTINGS SELECT (difficulty/instakill/start) ============
-let gameSettingsOptions = ["Difficulty", "Instakill", "Inf Ammo", "Start Game", "Back"];
+let gameSettingsOptions = ["Difficulty", "Instakill", "Big Inventory", "Inf Ammo", "Start Game", "Back"];
 let selectedSettingsOption = 0;
 let openWorldMode = false;
 let owGugFirstSecs = null;           // when the first gugerbird showed up this run (null = none yet)
@@ -915,7 +915,7 @@ let mpCheatsMode = "host";        // "everyone" | "host" | "off"
 let mpGameMode = "Classic";   // "Classic" | "Openworld" | "Followcamera"
 let mpLobbySel = 0;           // host's selected lobby row: 0 Cheats, 1 Game Mode, 2 Instakill, 3 Difficulty, 4 Start Game
 let mpDifficultyShown = "Normal"; // what clients see of the host's difficulty
-const MP_LOBBY_ROWS = 8;   // 0-5 settings, 6 = Public Party, 7 = Start Game, -1 = party name
+const MP_LOBBY_ROWS = 9;   // 0-6 settings, 7 = Public Party, 8 = Start Game, -1 = party name
 
 let mpPartyName = "";
 let mpPartyNameBackup = "";
@@ -965,8 +965,8 @@ document.addEventListener("keydown", (e) => {
   if(e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight"){
     if(e.key === "ArrowUp") mpLobbySel = (mpLobbySel <= -1) ? MP_LOBBY_ROWS - 1 : mpLobbySel - 1;
     else if(e.key === "ArrowDown") mpLobbySel = (mpLobbySel >= MP_LOBBY_ROWS - 1) ? -1 : mpLobbySel + 1;
-    else if(mpLobbySel === 6) mpPublic = !mpPublic;
-    else if(mpLobbySel >= 0 && mpLobbySel < 6) mpChangeLobbySetting(e.key === "ArrowRight" ? 1 : -1);
+    else if(mpLobbySel === 7) mpPublic = !mpPublic;
+    else if(mpLobbySel >= 0 && mpLobbySel < 7) mpChangeLobbySetting(e.key === "ArrowRight" ? 1 : -1);
     mpBroadcastLobbySettings();
     click();
     e.stopImmediatePropagation();
@@ -982,7 +982,7 @@ document.addEventListener("keydown", (e) => {
       mpPublic = false;                 // a started game can't be joined from the public list
       mpBroadcastLobbySettings();
       socket.emit("startGame");
-    } else if(mpLobbySel === 6){
+    } else if(mpLobbySel === 7){
       mpPublic = !mpPublic;
       mpBroadcastLobbySettings();
       click();
@@ -1172,6 +1172,12 @@ function drawMpPublic(){
     ctx.fillStyle = sel ? "yellow" : "white";
     ctx.textAlign = "left";
     ctx.fillText((sel ? "► " : "    ") + String(p.name || "Party").slice(0, 24), 40, 150 + i * 28);
+    if(p.gameMode){
+      ctx.textAlign = "left";
+      ctx.globalAlpha = sel ? 1 : 0.7;
+      ctx.fillText(String(p.gameMode).slice(0, 14), 400, 150 + i * 28);
+      ctx.globalAlpha = 1;
+    }
     ctx.textAlign = "right";
     const c = Number(p.players) || 1;
     ctx.fillText(c + (c === 1 ? " player" : " players"), canvas.width - 40, 150 + i * 28);
@@ -1262,6 +1268,7 @@ function drawMpLobbySettings(){
     "Game Mode: " + mpGameMode,
     "Difficulty: " + (mpIsHost ? difficulty : mpDifficultyShown),
     "Instakill: " + (instakillEnabled ? "ON" : "OFF"),
+    "Big Inventory: " + (bigInventoryEnabled ? "ON" : "OFF"),
     "Inf Ammo: " + (infAmmoEnabled ? "ON" : "OFF"),
     "Revive Mode: " + (mpReviveMode ? "ON" : "OFF"),
     "Cheats: " + cheatLabel,
@@ -1272,12 +1279,12 @@ function drawMpLobbySettings(){
   ctx.font = "14px sans-serif";
   const baseY = canvas.height - 335;
   // settings first, then a gap, then Public Party + Start Game together at the bottom
-  const rowY = i => baseY + 18 + i * 24 + (i >= 6 ? 30 : 0);
+  const rowY = i => baseY + 18 + i * 24 + (i >= 7 ? 30 : 0);
   ctx.fillStyle = "white";
   ctx.globalAlpha = 0.5;
   ctx.font = "12px sans-serif";
   ctx.fillText("GAME SETTINGS", canvas.width/2-100, baseY);
-  ctx.fillText("PARTY", canvas.width/2-100, rowY(6) - 20);
+  ctx.fillText("PARTY", canvas.width/2-100, rowY(7) - 20);
   ctx.globalAlpha = 1;
   ctx.font = "14px sans-serif";
   rows.forEach((label, i) => {
@@ -1315,10 +1322,12 @@ function mpChangeLobbySetting(step){
   } else if(mpLobbySel === 2){
     instakillEnabled = !instakillEnabled;
   } else if(mpLobbySel === 3){
-    infAmmoEnabled = !infAmmoEnabled;
+    bigInventoryEnabled = !bigInventoryEnabled;
   } else if(mpLobbySel === 4){
-    mpReviveMode = !mpReviveMode;
+    infAmmoEnabled = !infAmmoEnabled;
   } else if(mpLobbySel === 5){
+    mpReviveMode = !mpReviveMode;
+  } else if(mpLobbySel === 6){
     const order = ["everyone","host","off"];
     mpCheatsMode = order[(order.indexOf(mpCheatsMode) + step + order.length) % order.length];
   }
@@ -1326,7 +1335,7 @@ function mpChangeLobbySetting(step){
 
 function mpBroadcastLobbySettings(){
   if(socket && mpPartyCode && mpIsHost){
-    mpLobbyInit(); socket.emit("setPartyInfo", { name: mpPartyName, isPublic: mpPublic }); socket.emit("enemyState", { partyName: mpPartyName, partyPublic: mpPublic ? 1 : 0, cheatsMode: mpCheatsMode, gameMode: mpGameMode, instakill: instakillEnabled ? 1 : 0, infammo: infAmmoEnabled ? 1 : 0, difficulty: difficulty, reviveMode: mpReviveMode ? 1 : 0 });
+    mpLobbyInit(); socket.emit("setPartyInfo", { name: mpPartyName, isPublic: mpPublic, gameMode: mpGameMode }); socket.emit("enemyState", { partyName: mpPartyName, partyPublic: mpPublic ? 1 : 0, cheatsMode: mpCheatsMode, gameMode: mpGameMode, instakill: instakillEnabled ? 1 : 0, infammo: infAmmoEnabled ? 1 : 0, bigInventory: bigInventoryEnabled ? 1 : 0, difficulty: difficulty, reviveMode: mpReviveMode ? 1 : 0 });
   }
 }
 // the host keeps re-sending while in the lobby so players who join late still get the settings
@@ -2171,6 +2180,7 @@ function mpConnect(){
     if(data.gameMode !== undefined && data.gameMode !== mpGameMode){ mpApplyGameMode(data.gameMode); }
     if(data.instakill !== undefined){ instakillEnabled = !!data.instakill; }
     if(data.infammo !== undefined){ infAmmoEnabled = !!data.infammo; }
+    if(data.bigInventory !== undefined){ bigInventoryEnabled = !!data.bigInventory; }
     if(data.reviveMode !== undefined){ mpReviveMode = !!data.reviveMode; }
     if(data.partyName !== undefined){ mpPartyName = String(data.partyName).slice(0, 24); mpNameForCode = mpPartyCode; }
     if(data.partyPublic !== undefined){ mpPublic = !!data.partyPublic; }
@@ -2492,7 +2502,7 @@ function mpConnect(){
         id: nextItemId++, cid: data.cid,
         x: wx, y: wy,
         w: Math.min(ww, 120), h: Math.min(wh, 120),
-        health: 3, life: 90000, shake: 0
+        health: 12, life: 180000, shake: 0
       });
       for (let i = 0; i < 8; i++) {
         blood.push({ x: wx + (Math.random()-0.5)*10, y: wy + (Math.random()-0.5)*10,
@@ -2730,6 +2740,7 @@ function mpBuildSlow(){
     instakill: instakillEnabled ? 1 : 0,
     infammo: infAmmoEnabled ? 1 : 0,
     reviveMode: mpReviveMode ? 1 : 0,
+    bigInventory: bigInventoryEnabled ? 1 : 0,
     pickups: pickups.map(p=>({id:p.id,x:mpR(p.tw?p.tw.tx:p.x),y:mpR(p.tw?p.tw.ty:p.y),cid:p.cid,dg:p.tw?{sx:mpR(p.tw.sx),sy:mpR(p.tw.sy),el:Math.round(performance.now()-p.tw.start)}:undefined})),
     gunPickups: gunPickups.map(g=>({id:g.id,x:g.x,y:g.y,gunKey:g.gunKey,glyph:g.glyph,bob:g.bob,rotation:g.rotation})),
     healthKits: healthKits.map(h=>({id:h.id,x:h.x,y:h.y})),
@@ -3051,6 +3062,7 @@ let autoAimAngle = 0;
 const AUTO_AIM_RANGE = 400;
 let instakillEnabled = true; // default: enemies die in one hit
 let infAmmoEnabled = false;  // Inf Ammo toggle
+let bigInventoryEnabled = true;  // Big Inventory toggle (ON by default)
 
 function mpReviveSelf(){
   if(!player || player.alive) return;
@@ -4095,10 +4107,25 @@ function pickWeightedGunKey(){
 
 
 // Inventory UI/behavior
-const MAX_INVENTORY_SLOTS = 5;
+const MIN_INVENTORY_SLOTS = 6;    // slots shown when Big Inventory is OFF (pistol + 5 empty)
+const MAX_INVENTORY_SLOTS = 13;   // the most guns you can carry when Big Inventory is ON
+// the most guns you can hold right now
+function inventoryMaxSlots(){
+  return bigInventoryEnabled ? MAX_INVENTORY_SLOTS : MIN_INVENTORY_SLOTS;
+}
+// how many slots are shown right now
+function inventorySlotCount(){
+  const n = (player && player.inventory) ? player.inventory.length : 0;
+  if(!bigInventoryEnabled) return MIN_INVENTORY_SLOTS;          // fixed 5 slots
+  return Math.max(1, Math.min(MAX_INVENTORY_SLOTS, n));         // starts at 1, grows by 1 per gun, max 13
+}
+// true if this gun would need a new slot but all slots are already used
+function inventoryIsFullFor(gkey){
+  return !!(player && player.inventory && !player.inventory.includes(gkey) && player.inventory.length >= inventoryMaxSlots());
+}
 // pre-layout for inventory drawing/clicks
 const inventoryUI = {
-  x: canvas.width - 245, // top-right corner area
+  get x(){ return canvas.width - 5 - (inventorySlotCount() - 1) * (this.slotW + this.slotGap) - this.slotW; },   // right edge stays in the top-right corner, grows to the left
   y: 12,
   slotW: 40,
   slotH: 40,
@@ -4431,14 +4458,17 @@ if(choice==="Start Game"){
         instakillEnabled = !instakillEnabled;
       }
       else if(selectedSettingsOption === 2){
-        infAmmoEnabled = !infAmmoEnabled;
+        bigInventoryEnabled = !bigInventoryEnabled;
       }
       else if(selectedSettingsOption === 3){
+        infAmmoEnabled = !infAmmoEnabled;
+      }
+      else if(selectedSettingsOption === 4){
         stopTitleMusic();
         gameState = "intro";
         playIntroSequence();
       }
-      else if(selectedSettingsOption === 4){
+      else if(selectedSettingsOption === 5){
         gameState = "modeselect";
       }
     }
@@ -4571,7 +4601,7 @@ if(e.key==="Enter"){
       mpBroadcastLobbySettings();
       playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
     } else if(e.key==="Enter" && mpIsHost){
-      if(mpLobbySel === 6){
+      if(mpLobbySel === 8){
         mpBroadcastLobbySettings();
         socket.emit("startGame");
       } else {
@@ -4676,15 +4706,33 @@ else if(gameState==="gameover"){
       // We don't fire immediately here; update() handles fire cadence
       e.preventDefault();
     }
-    // Quick swap keys (1..4) for inventory - convenience (non-destructive)
-    if(e.key >= "1" && e.key <= "4" && player.alive){
-      const idx = Number(e.key)-1;
+    // Quick swap keys (1..9, 0 = slot 10) for inventory - convenience (non-destructive)
+    if(e.key.length === 1 && e.key >= "0" && e.key <= "9" && player.alive){
+      const idx = (e.key === "0") ? 9 : Number(e.key) - 1;
       const gkey = gunAtSlot(idx);
       if(gkey) { setCurrentGun(gkey); playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav"); }
     }
   }
 });
 
+
+// ===== SCROLL WHEEL: cycle through your inventory =====
+let lastWheelSwitch = 0;
+document.addEventListener("wheel", e => {
+  if(gameState !== "playing" || !player || !player.alive) return;
+  try { if(mpClientMenuOpen) return; } catch(err) {}
+  e.preventDefault();
+  const now = performance.now();
+  if(now - lastWheelSwitch < 80) return;   // stops trackpads from skipping several slots at once
+  const n = player.inventory.length;
+  if(n < 2) return;
+  lastWheelSwitch = now;
+  let at = player.inventory.indexOf(player.currentGunKey);
+  if(at === -1) at = 0;
+  const dir = e.deltaY > 0 ? 1 : -1;       // scroll down = next slot, scroll up = previous slot
+  setCurrentGun(player.inventory[(at + dir + n) % n]);
+  playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
+}, { passive: false });
 
 document.addEventListener("paste", e => {
   if(gameState==="options" && editingGlyph){
@@ -5483,8 +5531,8 @@ function fireHammer(now) {
     y: wallY,
     w: placement.w,
     h: placement.h,
-    health: 3,
-    life: 90000,
+    health: 12,
+    life: 180000,
     shake: 0
   };
   if (socket && mpPartyCode) {
@@ -7532,6 +7580,7 @@ let targetY = dashTarget.y;
 // ====== INVENTORY HELPERS ======
 function ensureInInventory(gkey){
   if(!player.inventory.includes(gkey)){
+    if(player.inventory.length >= inventoryMaxSlots()) return;   // inventory full
     // keep pistol always present at index 0; push others later
     player.inventory.push(gkey);
   }
@@ -7568,7 +7617,7 @@ function handleInventoryClick(e){
   // compute slots region
   const startX = inventoryUI.x;
   const startY = inventoryUI.y;
-  for(let i=0;i<MAX_INVENTORY_SLOTS;i++){
+  for(let i=0;i<inventorySlotCount();i++){
     const sx = startX + i*(inventoryUI.slotW + inventoryUI.slotGap);
     const sy = startY;
     if(mx >= sx && mx <= sx+inventoryUI.slotW && my >= sy && my <= sy+inventoryUI.slotH){
@@ -8424,6 +8473,20 @@ const taper = 90;   // length of the pointed, faded end next to the baster
 // ====== UPDATE ======
 function update(time){
     mpFrameT = performance.now();
+
+    // paused: the survival timer stops (startTime is pushed forward by the time spent paused)
+    if (gameState === "paused") {
+      if (window.__pauseLastT) startTime += mpFrameT - window.__pauseLastT;
+      window.__pauseLastT = mpFrameT;
+    } else {
+      window.__pauseLastT = 0;
+    }
+
+    // tutorial: no items / pickups on the ground at the very start
+    if (tutorialActive && tutorialStep === 0) {
+      pickups.length = 0; gunPickups.length = 0; healthKits.length = 0;
+      Magnetpickup.length = 0; bricks.length = 0; cars.length = 0; worldItems.length = 0;
+    }
 
     // ===== DEATH ANIMATION UPDATE =====
     if (gameState === "deathAnim") {
@@ -10232,6 +10295,14 @@ bricks.forEach((b, bi) => {
     const gLocalX = gdx * Math.cos(gunRot) + gdy * Math.sin(gunRot);
     const gLocalY = -gdx * Math.sin(gunRot) + gdy * Math.cos(gunRot);
     if(Math.abs(gLocalX) < gunHalfW && Math.abs(gLocalY) < gunHalfH){
+      if (inventoryIsFullFor(g.gunKey)) {
+        // full: leave the gun on the floor and tell the player (message is throttled)
+        if (!g.fullMsgAt || performance.now() - g.fullMsgAt > 1500) {
+          g.fullMsgAt = performance.now();
+          spawnFloatText("INVENTORY FULL", g.x, g.y - 12, "red");
+        }
+        return;
+      }
       if (g.gunKey === "timestop") {
         ensureInInventory("timestop");
         player.timestops = (player.timestops || 0) + 1;
@@ -11350,35 +11421,47 @@ function bossRunAttack() {
         const maxG = cols - gapW;
         const vy = P ? 3.4 : 3;
 
+        // The wall is built on a fixed WORLD grid (column i covers world x = i * cell),
+        // so the gap stays at the same world spot in every row even when the screen follows you.
+        const inOW = openWorldMode && !wavesMode;
+        const c0 = Math.floor(bossAX / cell);          // first world column that is on screen
+        const lo = c0 + (inOW ? 1 : 0);                // leftmost allowed gap column
+        const hi = c0 + maxG - (inOW ? 1 : 0);         // rightmost allowed gap column
+
         let g;
 
         if (boss.gapCol < 0) {
-          g = Math.floor(Math.random() * (maxG + 1));
+          g = lo + Math.floor(Math.random() * (hi - lo + 1));
           boss.gapTarget = undefined;
         } else {
-          // pick a far-away target column, walk toward it, then pick a new one
-          if (boss.gapTarget === undefined || boss.gapTarget === boss.gapCol) {
+          g = boss.gapWorld;
+          if (g < lo) g = lo; else if (g > hi) g = hi;   // screen scrolled away: pull the gap back on screen
+          if (boss.gapTarget === undefined || boss.gapTarget === g || boss.gapTarget < lo || boss.gapTarget > hi) {
+            let tries = 0;
             do {
-              boss.gapTarget = Math.floor(Math.random() * (maxG + 1));
-            } while (Math.abs(boss.gapTarget - boss.gapCol) < 6);
+              boss.gapTarget = lo + Math.floor(Math.random() * (hi - lo + 1));
+            } while (Math.abs(boss.gapTarget - g) < 6 && ++tries < 30);
           }
-          const gapDist = Math.abs(boss.gapTarget - boss.gapCol);
+          const gapDist = Math.abs(boss.gapTarget - g);
           const gapStep = Math.min(gapDist, 1 + Math.floor(Math.random() * 2));
-          g = boss.gapCol + Math.sign(boss.gapTarget - boss.gapCol) * gapStep;
+          g = g + Math.sign(boss.gapTarget - g) * gapStep;
         }
 
-        g = Math.max(0, Math.min(maxG, g));
-        boss.gapCol = g;
+        g = Math.max(lo, Math.min(hi, g));
+        boss.gapWorld = g;     // the gap's position in world columns
+        boss.gapCol = 0;       // only marks "a gap has been picked this attack"
 
-        for (let i = 0; i < cols; i++) {
+        const margin = inOW ? 3 : 0;   // a few extra columns past the screen edges while the screen moves
+        for (let i = c0 - margin; i < c0 + cols + margin; i++) {
           if (i >= g && i < g + gapW) continue;
+          const wx = cell / 2 + i * cell;
 
           bossMini(
-            bossAX + cell / 2 + i * cell,
+            wx,
             bossAY + 14,
             Math.PI / 2,
             30,
-            (x, y) => bossFireV(x, bossAY + 22, 0, vy, "▼")
+            (x, y) => bossFireV(wx, bossAY + 22, 0, vy, "▼")
           );
         }
       }
@@ -11814,6 +11897,7 @@ else if (gameState === "gamesettings") {
     const topLabels = [
       "Difficulty: " + difficulty,
       "Instakill: " + (instakillEnabled ? "ON" : "OFF"),
+      "Big Inventory: " + (bigInventoryEnabled ? "ON" : "OFF"),
       "Inf Ammo: " + (infAmmoEnabled ? "ON" : "OFF")
     ];
 
@@ -11828,7 +11912,7 @@ else if (gameState === "gamesettings") {
     const bottomLabels = ["Start Game", "Back"];
 
     bottomLabels.forEach((label, i) => {
-        const index = i + 3; // these come after Difficulty(0), Instakill(1) and Inf Ammo(2)
+        const index = i + 4; // these come after Difficulty(0), Instakill(1), Big Inventory(2) and Inf Ammo(3)
         ctx.fillStyle =
           index === selectedSettingsOption ? "yellow" : "white";
 
@@ -12024,16 +12108,37 @@ ctx.restore();
     ctx.fillText("Party Code: " + mpPartyCode, canvas.width/2-100, 80);
     ctx.restore();
     ctx.font="16px sans-serif";
-    let names = Object.values(mpPlayers).map(p=>p.username);
+    let names = Object.values(mpPlayers).map(p => String(p.username || "Player"));
     {
-      const nameTop = 130;
-      const nameLimit = canvas.height - 335 - 30;   // names have to stay above the GAME SETTINGS block
-      const perCol = Math.max(1, Math.floor((nameLimit - nameTop) / 24) + 1);
+      const nameTop = 120;
+      const nameLimit = canvas.height - 335 - 30;   // names must stay above the GAME SETTINGS block
+      const colW = 180;
+      const maxCols = Math.floor((canvas.width - 80) / colW);   // 4 columns across the screen
+      // pick the biggest text size where everyone still fits above the settings
+      const sizes = [[16,24],[14,20],[12,16],[11,14],[10,12]];
+      let fs = 10, rowH = 12, perCol = 1;
+      for(const [f, r] of sizes){
+        fs = f; rowH = r;
+        perCol = Math.max(1, Math.floor((nameLimit - nameTop) / rowH) + 1);
+        if(names.length <= perCol * maxCols) break;
+      }
+      const cols = Math.min(maxCols, Math.max(1, Math.ceil(names.length / perCol)));
+      const gridX = (cols === 1) ? canvas.width/2 - 100 : canvas.width/2 - (cols * colW) / 2;
+      ctx.save();
+      ctx.font = fs + "px sans-serif";
+      ctx.textAlign = "left";
       names.forEach((n, i) => {
-        const col = Math.floor(i / perCol);   // when a column is full, start a new one to the right
-        const row = i % perCol;
-        ctx.fillText(n, canvas.width/2 - 100 + col * 200, nameTop + row * 24);
+        const col = Math.floor(i / perCol);
+        if(col >= maxCols) return;
+        let t = n;
+        const maxW = colW - 14;
+        if(ctx.measureText(t).width > maxW){
+          while(t.length > 1 && ctx.measureText(t + "…").width > maxW) t = t.slice(0, -1);
+          t += "…";
+        }
+        ctx.fillText(t, gridX + col * colW, nameTop + (i % perCol) * rowH);
       });
+      ctx.restore();
     }
     ctx.font="14px sans-serif";
     ctx.fillText(mpIsHost ? "Select Start Game and press Enter" : "Waiting for host to start...", canvas.width/2-100, canvas.height-60);
@@ -13156,7 +13261,7 @@ function drawInventory(){
   ctx.fillText("Inventory", inventoryUI.x, inventoryUI.y - 4);
 
   // Draw slots
-  for(let i=0;i<MAX_INVENTORY_SLOTS;i++){
+  for(let i=0;i<inventorySlotCount();i++){
     const x = inventoryUI.x + i*(inventoryUI.slotW + inventoryUI.slotGap);
     const y = inventoryUI.y;
 
@@ -13178,6 +13283,14 @@ function drawInventory(){
         const glyph = GUNS[gkey]?.glyph || "→";
         // center-ish
         ctx.fillText(glyph, x + 4, y + inventoryUI.slotH/2 + 4);
+      }
+      // stack count (nukes / time stops), drawn small in the top-right like a power symbol
+      const stackCount = (gkey === "nuke") ? (player.nukes || 0) : (gkey === "timestop") ? (player.timestops || 0) : 0;
+      if(stackCount > 1){
+        ctx.font = "bold 11px sans-serif";
+        ctx.fillStyle = "yellow";
+        ctx.textAlign = "right";
+        ctx.fillText(String(stackCount), x + inventoryUI.slotW - 3, y + 11);
       }
       ctx.restore();
     }else{
@@ -13274,7 +13387,7 @@ setInterval(()=>{
 }, 3000);
 // ====== CAR SPAWN SYSTEM ======
 setInterval(() => {
-  if (gameState === "playing" && !inCar && !tutorialActive && !isMultiplayerClient && !boss.active && !playerActive() && Math.random() < 0.54) { // 20% chance
+  if (gameState === "playing" && !inCar && !tutorialActive && !isMultiplayerClient && !boss.active && !playerActive() && Math.random() < 0.15) { // 15% chance
     const carSpawnPos = randomPointInPlayableArea(40);
     cars.push({
       id: nextItemId++,
@@ -13786,9 +13899,12 @@ resetGame = function(){
 function startTutorial(){
   stopTitleMusic();
   openWorldMode = false;
+  wavesMode = false;   // don't carry Waves mode into the tutorial
   followCameraMode = false;
   gameState = "playing";
   resetGame();
+  pickups.length = 0; gunPickups.length = 0; healthKits.length = 0;
+  Magnetpickup.length = 0; bricks.length = 0; cars.length = 0; worldItems.length = 0;
   bgMusic.pause();
   tutorialActive = true;
   tutorialStep = 0;
