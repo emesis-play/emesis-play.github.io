@@ -89,6 +89,7 @@ style="
 // ===== ARCADE MODE (type /arcade on the title screen) =====
 let arcadeMode = false;
 let arcadeSplashing = false;
+let ARCADE_ZOOM = 1;
 const arcadeSplashImg = new Image();
 arcadeSplashImg.src = "https://file.garden/Zfwe_2Ig9weivlFh/emesis%20arcade%20activate.png";
 let arcadeAimAngle = 0;
@@ -113,6 +114,10 @@ function arcadeNextGun(){
 function activateArcadeMode(){
   if(gameState !== "title"){ console.info("/arcade only works on the title screen"); return; }
   arcadeMode = true;
+  FULLSCREEN_MODE = false;   // arcade: normal fixed-size game window...
+  ARCADE_ZOOM = 1.25;        // ...zoomed in 125%
+  fitGameToWindow();
+  applyResolution();
   keys = {};
   console.info("ARCADE MODE ON: WASD / T / left click only (reload the page to turn it off)");
 
@@ -201,7 +206,7 @@ setInterval(() => {
 // ===== END ARCADE MODE =====
 
 // ===== SET THIS: true = game scales to fill the window (no stretching), false = normal fixed 800x600 =====
-const FULLSCREEN_MODE = true;
+let FULLSCREEN_MODE = true;
 
 const realCanvas = document.getElementById("game");
 const ctx = realCanvas.getContext("2d");
@@ -239,7 +244,7 @@ let RES_SCALE = 1;
 function computeResScale(){
   const v = RES_OPTIONS[resIndex].v;
   if(v > 0) return v;
-  const fit = FULLSCREEN_MODE ? Math.min(window.innerWidth / GAME_W, window.innerHeight / GAME_H) : 1;
+  const fit = FULLSCREEN_MODE ? Math.min(window.innerWidth / GAME_W, window.innerHeight / GAME_H) : ARCADE_ZOOM;
   return Math.max(0.5, Math.min(3, fit * (window.devicePixelRatio || 1)));
 }
 function applyResolution(){
@@ -356,7 +361,8 @@ function fitGameToWindow(){
     wrap.style.left = "auto";
     wrap.style.top = "auto";
     wrap.style.margin = "0 auto";
-    wrap.style.transform = "none";
+    wrap.style.transformOrigin = "top center";
+    wrap.style.transform = (ARCADE_ZOOM !== 1) ? "scale(" + ARCADE_ZOOM + ")" : "none";
     return;
   }
   wrap.style.position = "absolute";
