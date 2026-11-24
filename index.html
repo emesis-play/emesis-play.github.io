@@ -86,6 +86,120 @@ style="
    - Hold E/Space to fire continuously (Uzi fires ~every 0.1s)
    ============================================================ */
 
+// ===== ARCADE MODE (type /arcade on the title screen) =====
+let arcadeMode = false;
+let arcadeSplashing = false;
+const arcadeSplashImg = new Image();
+arcadeSplashImg.src = "https://file.garden/Zfwe_2Ig9weivlFh/emesis%20arcade%20activate.png";
+let arcadeAimAngle = 0;
+let arcadeShownAngle = 0;
+
+function arcadeSend(type, k, rep){
+  const ev = new KeyboardEvent(type, { key: k, code: k, repeat: !!rep, bubbles: true, cancelable: true });
+  ev.isArcade = true;
+  document.dispatchEvent(ev);
+}
+function arcadePress(k){ arcadeSend("keydown", k); arcadeSend("keyup", k); }
+
+function arcadeNextGun(){
+  if(!player || !player.alive) return;
+  const n = player.inventory.length;
+  if(n < 2) return;
+  let at = player.inventory.indexOf(player.currentGunKey);
+  if(at === -1) at = 0;
+  setCurrentGun(player.inventory[(at + 1) % n]);
+  playSound("https://file.garden/Zfwe_2Ig9weivlFh/menu%20button.wav");
+}
+function activateArcadeMode(){
+  if(gameState !== "title"){ console.info("/arcade only works on the title screen"); return; }
+  arcadeMode = true;
+  keys = {};
+  console.info("ARCADE MODE ON: WASD / T / left click only (reload the page to turn it off)");
+
+  // splash over the game window only, for 2 seconds, then back to the title screen with the menu music
+  const oldSplash = document.getElementById("arcadeSplash");
+  if(oldSplash) oldSplash.remove();
+  arcadeSplashing = true;
+  stopTitleMusic();   // silence until the splash is over
+  const splash = document.createElement("img");
+  splash.id = "arcadeSplash";
+  splash.src = arcadeSplashImg.src;
+  splash.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;object-fit:fill;z-index:10000;pointer-events:none;";
+  document.getElementById("gameWrap").appendChild(splash);
+  setTimeout(() => {
+    splash.remove();
+    arcadeSplashing = false;
+    if(gameState === "title") playTitleMusic();
+  }, 2000);
+}
+
+function arcadeKeyFilter(e){
+  if(!arcadeMode || e.isArcade || !e.key) return;
+  if(arcadeSplashing){ e.stopImmediatePropagation(); e.preventDefault(); return; }
+  const t = e.target;
+  if(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+  if(gameState === "mpusername" || gameState === "mpjoincode" || (gameState === "options" && editingGlyph)){   // typing screens
+    if(e.key.toLowerCase() === "t"){               // T = back (Escape) here too
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      if(!e.repeat) arcadeSend(e.type, "Escape", false);
+    }
+    return;                                        // every other key types normally
+  }
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  const wasd = ["w", "a", "s", "d"];
+  if(e.type === "keyup" && wasd.includes(k)) keys[k] = false;   // never leave a movement key stuck down
+  const live = gameState === "playing" && player && player.alive;
+  if(live && wasd.includes(k)) return;                          // normal WASD movement in the game
+  e.stopImmediatePropagation();                                  // every real key is hidden from the game...
+  if(!(wasd.includes(k) || k === "t")) return;                   // ...and every key except WASD / T does nothing
+  e.preventDefault();
+  if(live){
+    if(k === "t" && e.type === "keydown" && !e.repeat) arcadeNextGun();   // T = switch weapon
+    return;
+  }
+  if(gameState === "playing" && k === "t") return;              // (dead + spectating: T does nothing)
+  const map = { w: "ArrowUp", s: "ArrowDown", a: "ArrowLeft", d: "ArrowRight", t: "Escape" };
+  if(k === "t" && e.repeat) return;                              // holding T only goes back one screen
+  arcadeSend(e.type, map[k], e.repeat);                          // menus: WASD = arrow keys, T = back/Escape
+}
+window.addEventListener("keydown", arcadeKeyFilter, true);
+window.addEventListener("keyup", arcadeKeyFilter, true);
+
+window.addEventListener("mousedown", e => {
+  if(!arcadeMode || e.button !== 0 || arcadeSplashing) return;
+  if(e.target && /^(INPUT|TEXTAREA|BUTTON|SELECT)$/.test(e.target.tagName)) return;
+  if(gameState === "playing" && player && player.alive){ player.shootingHeld = true; return; }   // in game: click = shoot
+  arcadePress("Enter");                                                                           // menus: click = Enter
+}, true);
+window.addEventListener("mouseup", e => {
+  if(!arcadeMode || e.button !== 0 || !player) return;
+  if(gameState === "playing" && player.alive && player.currentGunKey === "railgun") releaseRailgun(performance.now());
+  player.shootingHeld = false;
+}, true);
+
+// typing /arcade in the console (console.log("/arcade")) turns it on straight away
+(function(){
+  const prevLog = console.log;
+  console.log = function(msg){
+    if(typeof msg === "string" && msg.trim().toLowerCase() === "/arcade"){
+      window.lastConsoleCommand = null;
+      activateArcadeMode();
+      return;
+    }
+    return prevLog.apply(console, arguments);
+  };
+})();
+// the game reads console commands from window.lastConsoleCommand, so also watch that directly
+setInterval(() => {
+  const c = window.lastConsoleCommand;
+  if(typeof c === "string" && c.trim().toLowerCase() === "/arcade"){
+    window.lastConsoleCommand = null;
+    activateArcadeMode();
+  }
+}, 30);
+// ===== END ARCADE MODE =====
+
 // ===== SET THIS: true = game scales to fill the window (no stretching), false = normal fixed 800x600 =====
 const FULLSCREEN_MODE = true;
 
@@ -2102,6 +2216,19 @@ function mpLeaveToTitle(msg){
   showTitleScreen();
 }
 
+// stop a party that is still being made (used when you leave the multiplayer menu mid-create)
+function mpCancelCreateParty(){
+  mpCreating = false;
+  if(socket){
+    const dying = socket;
+    socket = null;
+    mpPartyCode = "";
+    mpIsHost = false;
+    isMultiplayerClient = false;
+    try { dying.disconnect(); } catch(err) {}
+  }
+}
+
 function mpConnect(){
   if(socket) return;
   socket = io(MP_SERVER_URL, { transports: ["websocket", "polling"] });
@@ -3229,6 +3356,11 @@ setInterval(() => {
 }, 50);
 
 function handleConsoleCommand(cmd) {
+    if (cmd.trim().toLowerCase() === "/arcade") {
+        window.lastConsoleCommand = null;
+        activateArcadeMode();
+        return;
+    }
     if (cmd.trim().toLowerCase().startsWith("/revive")) {
         window.lastConsoleCommand = null;
         if (!(socket && mpPartyCode && mpIsHost)) return;   // host only
@@ -4517,7 +4649,7 @@ if(choice==="Start Game"){
 if(e.key==="Enter"){
   playSound("...menu button.wav");
   // --- Gameplay ---
-  if(optionIndex===0) autoAimEnabled = !autoAimEnabled;
+  if(optionIndex===0 && !arcadeMode) autoAimEnabled = !autoAimEnabled;
   if(optionIndex===1) flashOnShoot = !flashOnShoot;
   if(optionIndex===2) cameraShakeEnabled = !cameraShakeEnabled;
   // --- Player ---
@@ -4578,7 +4710,7 @@ if(e.key==="Enter"){
         gameState = "mpjoincode";
       }
     } else if(e.key==="Escape"){
-      mpCreating = false;
+      mpCancelCreateParty();
       gameState="title";
     }
   }
@@ -8745,7 +8877,25 @@ if (isCameraActive()) {
     mouse.y = liveMouse.y;
 }
 
-if (autoAimEnabled && player.alive) {
+if (arcadeMode && player.alive) {
+    // arcade: with no target in range the gun eases round to the way you are moving
+    const adx = (keys["d"] ? 1 : 0) - (keys["a"] ? 1 : 0);
+    const ady = (keys["s"] ? 1 : 0) - (keys["w"] ? 1 : 0);
+    if (adx !== 0 || ady !== 0) arcadeAimAngle = Math.atan2(ady, adx);
+    const arcT = findNearestAimTarget();
+    const arcHasTarget = arcT && Math.hypot(arcT.x - player.x, arcT.y - player.y) <= AUTO_AIM_RANGE;
+    if (arcHasTarget) {
+        arcadeShownAngle = autoAimAngle;   // follow the auto aim so there is no jump when the target is lost
+    } else {
+        let arcDiff = arcadeAimAngle - arcadeShownAngle;
+        arcDiff = Math.atan2(Math.sin(arcDiff), Math.cos(arcDiff));   // always turn the short way round
+        arcadeShownAngle += arcDiff * 0.12;                           // lower = smoother/slower, higher = snappier
+        autoAimAngle = arcadeShownAngle;
+    }
+    mouse.x = player.x + Math.cos(arcadeShownAngle) * 200;
+    mouse.y = player.y + Math.sin(arcadeShownAngle) * 200;
+}
+if ((autoAimEnabled || arcadeMode) && player.alive) {
     const aimTarget = findNearestAimTarget();
     if (aimTarget) {
         const distToTarget = Math.hypot(aimTarget.x - player.x, aimTarget.y - player.y);
@@ -11983,7 +12133,7 @@ ctx.restore();
     // options list (grouped into categories)
     const optionGroups = [
         { title: "Gameplay", items: [
-            "Auto Aim: " + (autoAimEnabled ? "ON" : "OFF"),
+            (arcadeMode ? "Auto Aim: ALWAYS ON" : "Auto Aim: " + (autoAimEnabled ? "ON" : "OFF")),
             "Screen Flash: " + (flashOnShoot ? "ON" : "OFF"),
             "Camera Shake: " + (cameraShakeEnabled ? "ON" : "OFF")
         ]},
@@ -13828,6 +13978,15 @@ brodies gay
       wavesSkipToBoss();
       console.log("Skipping to the boss!");
     }
+} else if (cmd.toLowerCase() === "/arcade") {
+    e.stopPropagation();
+    if (gameState === "title") {
+        activateArcadeMode();
+        consoleOpen = false;                    // close the console
+        devConsole.style.display = "none";
+        devInput.blur();
+    }
+    else console.log("/arcade only works on the title screen.");
 } else if (cmd.startsWith("/runfunction ")) {
     // Ignore — handled by the DevTools console system
 } else {
